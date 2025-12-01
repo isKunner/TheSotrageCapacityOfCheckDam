@@ -1,0 +1,3 @@
+[submodule "DEMAndRemoteSensingUtils"]
+	path = DEMAndRemoteSensingUtils
+	url = git@github.com:isKunner/DEMAndRemoteSensingUtils.git
