@@ -1,3 +1,6 @@
 [submodule "DEMAndRemoteSensingUtils"]
 	path = DEMAndRemoteSensingUtils
 	url = git@github.com:isKunner/DEMAndRemoteSensingUtils.git
+[submodule "OperationOfArcGIS"]
+	path = OperationOfArcGIS
+	url = git@github.com:isKunner/OperationOfArcGIS.git
