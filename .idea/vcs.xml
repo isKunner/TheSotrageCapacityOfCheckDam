@@ -3,5 +3,6 @@
   <component name="VcsDirectoryMappings">
     <mapping directory="$PROJECT_DIR$" vcs="Git" />
     <mapping directory="$PROJECT_DIR$/DEMAndRemoteSensingUtils" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/OperationOfArcGIS" vcs="Git" />
   </component>
 </project>

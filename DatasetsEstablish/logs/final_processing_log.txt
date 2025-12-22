@@ -1,0 +1,12 @@
+2025-12-16 11:33:20,323 - INFO - ============================================================
+2025-12-16 11:33:20,324 - INFO - Integrated Slope/Road Processing and Grouping Pipeline
+2025-12-16 11:33:20,324 - INFO - ============================================================
+2025-12-16 11:33:20,324 - INFO - Arguments received: {'json_label_dir': './labels', 'tif_dir': './images', 'output_shp_path': './output/slope_road_final_grouped.shp', 'log_file_path': './logs/final_processing_log.txt', 'target_labels': ['slope', 'road'], 'overlap_threshold': 0.5, 'buffer_distance_meters': 1, 'angle_threshold_deg': 10.0, 'processing_mode': 'single'}
+2025-12-16 11:33:20,324 - INFO - === Step 1: Processing LabelMe JSONs and Deduplicating ===
+2025-12-16 11:33:20,324 - INFO - Label Directory: ./labels
+2025-12-16 11:33:20,324 - INFO - TIF Directory (for georef): ./images
+2025-12-16 11:33:20,324 - INFO - Target Labels: ['slope', 'road']
+2025-12-16 11:33:20,324 - INFO - Deduplication Overlap Threshold: 50.0%
+2025-12-16 11:33:20,324 - INFO - Processing Mode: single
+2025-12-16 11:33:20,325 - ERROR - Label directory does not exist: ./labels
+2025-12-16 11:33:20,325 - ERROR - Failed to create initial GeoDataFrame. Exiting.
