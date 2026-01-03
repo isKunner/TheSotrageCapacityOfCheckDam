@@ -6,8 +6,12 @@
 # @Describe : Generates unified slope/road Shapefile from LabelMe JSONs, deduplicates, then groups components.
 #             FIXED: Uses original geo coords for polygon storage, only projects a copy for calculations.
 #             ADDED: Groups features based on angle similarity and spatial proximity.
-import math
+
 import os
+import sys
+sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
+
+import math
 import json
 import argparse
 from typing import List
@@ -19,10 +23,7 @@ from rtree import index
 
 import geopandas as gpd
 from shapely.geometry import Polygon, LineString, Point
-from shapely.validation import make_valid
 from pyproj import CRS, Transformer
-from pyproj.aoi import AreaOfInterest
-from pyproj.database import query_utm_crs_info
 
 from DEMAndRemoteSensingUtils import get_geotransform_and_crs, pixel_to_geo_coords, calculate_meters_per_degree_precise
 
@@ -33,17 +34,14 @@ def parse_args():
 
     # Path configurations
     parser.add_argument('--json-label-dir', type=str,
-                        default=r"C:\Users\Kevin\Documents\PythonProject\CheckDam\Datasets\SlopeExtraction\Label",
+                        default=r"C:\Users\Kevin\Documents\PythonProject\CheckDam\Datasets\Test\WMG\GoogleLabel",
                         help='Directory containing LabelMe JSON files')
     parser.add_argument('--tif-dir', type=str,
-                        default=r"C:\Users\Kevin\Documents\PythonProject\CheckDam\Datasets\SpatialInfoExtraction\Google",
+                        default=r"C:\Users\Kevin\Documents\PythonProject\CheckDam\Datasets\Test\WMG\Google",
                         help='Directory containing TIF files for georeferencing')
     parser.add_argument('--output-shp-path', type=str,
-                        default=r"C:\Users\Kevin\Documents\PythonProject\CheckDam\Datasets\SlopeExtraction\check_dam_struct.shp",
+                        default=r"C:\Users\Kevin\Documents\PythonProject\CheckDam\Datasets\Test\WMG\check_dam_struct.shp",
                         help='Output Shapefile path')
-    parser.add_argument('--log-file-path', type=str,
-                        default=r"C:\Users\Kevin\Documents\PythonProject\CheckDam\Datasets\SlopeExtraction\check_dam_struct_log.txt",
-                        help='Log file path')
 
     # Target labels
     parser.add_argument('--target-labels', nargs='+', default=["slope", "road"], help='Target labels to process')
@@ -55,16 +53,10 @@ def parse_args():
     # Grouping parameters
     parser.add_argument('--buffer-distance-meters', type=float, default=1,  # Adjusted default
                         help='Buffer distance in meters for handling small gaps')
-    parser.add_argument('--group-distance-meters', type=float, default=200,  # Adjusted default
+    parser.add_argument('--group-distance-meters', type=float, default=50,  # Adjusted default
                         help='Buffer distance in meters for handling small gaps')
     parser.add_argument('--angle-threshold-deg', type=float, default=10.0,
                         help='Angle threshold in degrees for grouping')
-
-    # Processing mode parameter for coordinate projection strategy
-    parser.add_argument('--processing-mode', type=str, choices=['single', 'individual'], default='single',
-                        help='Processing mode for projection: '
-                             '"single" uses one projection per TIF file (faster), '
-                             '"individual" projects each feature separately (slower). Default: single.')
 
     return parser.parse_args()
 
@@ -299,8 +291,12 @@ def process_labels_from_jsons_to_gdf(args):
     group_id_counter = 0
     for group_info in result:
         indices = group_info['indices']
+        type_num = 0
         for idx in indices:
             gdf.loc[idx, 'group_id'] = group_id_counter
+            type_num += 1 if gdf.loc[idx, 'label']=='slope' else 10
+        for idx in indices:
+            gdf.loc[idx, 'group_type'] = type_num
         group_id_counter += 1
 
     gdf.to_file(args.output_shp_path, encoding='utf-8', driver='ESRI Shapefile')
