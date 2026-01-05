@@ -60,9 +60,10 @@
     11. **Output File**: Save the final JSON data as a .json file.
     12. **Logging & Error Tracking**: Use `logging` throughout the process to record detailed information to a file, and categorize specific errors into a CSV file for easy debugging and auditing.
 
+
 <p align="right">(<a href="#top">back to top</a>)</p>
 
-## generate_silted_land_shp_from_label
+## generate_check_dam_shp_from_label
 
 Unify Slope and Road LabelMe Annotations into a Single Shapefile (with Deduplication and Metric Calculation)
 
@@ -82,26 +83,42 @@ There exists a large number of manually annotated LabelMe JSON files containing 
 
 ### Inputs
 
-1.  **LabelMe JSON Directory (`--json-label-dir`)**: Path to the folder containing the `.json` annotation files.
-2.  **GeoTIFF Image Directory (`--tif-dir`)**: Path to the folder containing the corresponding `.tif` satellite/aerial images. The `imagePath` field in the JSON is used to match the correct TIF file.
-3.  **Target Labels (`--target-labels`)**: A list of labels to process (default: `["slope", "road"]`).
-4.  **Overlap Threshold (`--overlap-threshold`)**: IoU threshold (0.0 to 1.0) above which polygons are considered duplicates (default: `0.5`).
-5.  **Processing Mode (`--processing-mode`)**: Either `single` (uses original TIF geoinfo) or `individual` (recalculates MABR for each shape individually) (default: `single`).
-6.  **Output Paths (`--output-shp-path`, `--log-file-path`)**: Desired paths for the output Shapefile(s) and log file.
+| Parameter              | Description                                                                                                                                                                                                                                                                                       |
+|:-----------------------|:--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| json-label-dir         | The labels for 'Slope' and 'Road' annotated using the labeling software are in the form of rotated rectangular boxes. The interface can be modified later as needed based on the output of deep learning models.                                                                                  |
+| tif-dir                | The directory storing Google remote sensing images, which are the objects to be annotated.                                                                                                                                                                                                        |
+| output-shp-path        | The function extracts structural information of check dams, including the length, width, rotation angle, and center point of the rotated rectangular boxes corresponding to 'slope' and 'road', as well as grouping results. This information is then saved in a shapefile (.shp) format.         |
+| target-labels          | default=["slope", "road"], Target labels to process, Currently, only these two tags are supported, and subsequent code is written dead..                                                                                                                                                          |
+| overlap-threshold      | This is in preparation for the automatic detection later, which may be recognized multiple times by the overlap of the two structures, avoiding multiple recognitions.                                                                                                                            |
+| buffer-distance-meters | Each structure of a check dam should be connected. However, automated recognition might result in slight distances between components. Therefore, we expand the recognized rectangles to ensure the formation of connected regions, thereby identifying all components of a particular check dam. |
+| group-distance-meters  | However, the current algorithm seems to traverse the entire set of structures to find connected regions, which is clearly unreasonable. It should instead search within the surrounding area. Therefore, a threshold has been set, but it has not yet been implemented or applied.                |
+| angle-threshold-deg    | At bifurcation points within the gully, two dams might be very close to each other. In such cases, relying solely on distance could lead to misjudgment, identifying them as a single dam. Therefore, it is necessary to incorporate angular information for a comprehensive assessment.          |
+
+*   **Algorithm**:
+
+| Name   | Description       |
+|:-------|:------------------|
+| R-tree | rtree.index.Index |
+
 
 ### Outputs
 
-1.  **Shapefiles:**
-    *   One Shapefile for `slope` polygons (e.g., `merged_slope_deduplicated.shp`).
-    *   One Shapefile for `road` polygons (e.g., `merged_road_deduplicated.shp`).
-    *   Each Shapefile contains the following attributes for every feature:
-        *   `geometry`: The unified Polygon geometry in geographical coordinates.
-        *   `label`: The original label from the JSON (e.g., "slope").
-        *   `angle_deg`: The orientation angle (degrees) of the minimum bounding rectangle, defined as the clockwise angle from the X-axis to the first side touched during clockwise rotation. Range (0, 90].
-        *   `length_m`: The length (meters) of the minimum bounding rectangle, corresponding to the side perpendicular to the `width_m` side.
-        *   `width_m`: The width (meters) of the minimum bounding rectangle, corresponding to the side defined by the `angle_deg`.
-        *   `filename`: The name of the source TIF file.
-2.  **Log File:** A text log detailing the processing steps, files read, polygons found, duplicates removed, and any warnings/errors encountered.
+*   **Outputs:**
+    *   `Shapefiles:`
+        *   One Shapefile for `slope` polygons (e.g., `merged_slope_deduplicated.shp`).
+        *   One Shapefile for `road` polygons (e.g., `merged_road_deduplicated.shp`).
+        *   Each Shapefile contains the following attributes for every feature:
+            *   `geometry`: The unified Polygon geometry in geographical coordinates.
+            *   `label`: The original label from the JSON (e.g., "slope", "road").
+            *   `angle_deg`: The orientation angle (degrees) of the minimum bounding rectangle (MABR), defined as the clockwise angle from the X-axis to the first side touched during clockwise rotation. Range (0, 90].
+            *   `width_deg`: The width of the MABR in degrees (from the pixel coordinate system).
+            *   `height_deg`: The height of the MABR in degrees (from the pixel coordinate system).
+            *   `width_m`: The width of the MABR in meters.
+            *   `height_m`: The height of the MABR in meters.
+            *   `group_id`: A unique identifier for polygon groups (e.g., `slope_1`, `road_2`).
+            *   `group_type`: The type of grouping (e.g., "slope", "road").
+            *   `angle_id`: A unique identifier for the angle orientation (e.g., `angle_0`, `angle_45`).
+            *   `source`: The name of the source TIF file (extracted from `imagePath` in JSON, without path and extension).
 
 ### Methodology
 
