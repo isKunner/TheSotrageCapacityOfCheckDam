@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 # -*- coding:utf-8 -*-
-# @FileName: generate_silted_land_shp_from_label_with_grouping.py
+# @FileName: generate_check_dam_shp_from_label.py
 # @Time : 2025/12/16 11:00
 # @Author : Assistant (Based on your code)
 # @Describe : Generates unified slope/road Shapefile from LabelMe JSONs, deduplicates, then groups components.
@@ -52,7 +52,7 @@ def parse_args():
     """Parse command line arguments with explicit hard-coded params."""
     parser = argparse.ArgumentParser(description='Generate and group slope/road Shapefile from LabelMe JSONs')
 
-    # Path configurations
+    # LocalPath configurations
     parser.add_argument('--json-label-dir', type=str,
                         default=r"C:\Users\Kevin\Documents\PythonProject\CheckDam\Datasets\Test\WMG\GoogleLabel",
                         help='Directory containing LabelMe JSON files')
@@ -511,7 +511,7 @@ def save_gdf_to_shp(gdf: gpd.GeoDataFrame, output_path: str) -> None:
 
     Args:
         gdf: GeoDataFrame to save
-        output_path: Path to output Shapefile
+        output_path: LocalPath to output Shapefile
     """
     if not gdf.empty:
         gdf.to_file(output_path, encoding='utf-8', driver='ESRI Shapefile')

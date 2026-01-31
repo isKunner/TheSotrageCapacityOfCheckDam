@@ -1,0 +1,5 @@
+.mypycache
+**/__pycache__
+.vscode
+cdse-copernicus-dem-downloader/auxiliary/S2A_OPER_GIP_TILPAR_MPC__20151209T095117_V20150622T000000_21000101T000000_B00.kml
+cdse-copernicus-dem-downloader/output_dir

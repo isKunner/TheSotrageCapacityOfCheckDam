@@ -1,13 +1,97 @@
-numpy
-pandas
+name: geo-torch
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.11
+  - numpy=1.26.4
+  # 地理空间核心依赖
+  - gdal=3.8.4
+  - geos=3.12.1
+  - proj=9.3.1
+  # 地理空间高级库
+  - rasterio=1.3.9
+  - fiona=1.9.5
+  - shapely=2.0.2
+  - geopandas=0.14.3
+  # 可视化/图像处理库
+  - matplotlib
+  - opencv
+  - pillow
+  # Depth Anythin v3
+  - omegaconf
+  - addict
+  - einops
+  - safetensors
+  - huggingface_hub
+  - moviepy
+  - plyfile
+  - pycolmap
+  - trimesh
+  - evo
+  # pip依赖（会自动调用pip安装）
+  - pip
+  - pip:
+    # PyTorch相关（CUDA 118版本）
+    - torch==2.1.2
+    - torchvision==0.16.2
+    - torchaudio==2.1.2
+    # 其他工具包
+    - tqdm==4.66.1
+    - lightning==2.4.0
+    - torchmetrics==1.3.2
+    - whitebox==2.3.0
 
-geopandas
-shapely
-rasterio
-osgeo
-whitebox
 
-torch
-tqdm
-lighting
-torchmetrics
+# 1. 创建并激活环境
+conda create -n geo-torch python=3.11 -y
+conda activate geo-torch
+
+# 2. 安装基础数值库
+conda install numpy=1.26.4 -y
+
+# 3. 安装地理空间核心依赖（注意：gdal和libgdal版本号要匹配）
+conda install -c conda-forge gdal=3.8.4 geos=3.12.1 proj=9.3.1 -y
+# 注意：libgdal通常随gdal一起安装，不需要单独指定版本
+
+# 4. 安装地理空间高级库
+conda install -c conda-forge rasterio=1.3.9 fiona=1.9.5 shapely=2.0.2 geopandas=0.14.3 -y
+
+# 5. 安装可视化/图像处理库
+conda install -c conda-forge matplotlib opencv pillow -y
+
+# 6. PyTorch安装（注意：lightning 2.2.0需要PyTorch 2.1+）
+pip install torch==2.1.2 torchvision==0.16.2 torchaudio==2.1.2 --index-url https://download.pytorch.org/whl/cu118
+# CPU版本备选：
+# pip install torch==2.1.2 torchvision==0.16.2 torchaudio==2.1.2 --index-url https://download.pytorch.org/whl/cpu
+
+# 7. 其他工具包（lightning 2.4.0对应的兼容版本）
+pip install tqdm==4.66.1 lightning==2.4.0 torchmetrics==1.3.2 whitebox==2.3.0
+
+
+# 前置：加载集群conda基础环境（集群必做，否则mamba不可用）
+module load conda_base_py310
+
+# 1. 创建并激活环境（替换为mamba，集群激活用source）
+mamba create -n geo-torch python=3.11 -y
+# Linux集群激活方式（必须用source，而非conda/mamba activate）
+source activate geo-torch
+
+# 2. 安装基础数值库（替换为mamba，保留版本）
+mamba install numpy=1.26.4 -y
+
+# 3. 安装地理空间核心依赖（替换为mamba，保留所有指定版本）
+mamba install -c conda-forge gdal=3.8.4 geos=3.12.1 proj=9.3.1 libgdal=3.8.4 -y
+
+# 4. 安装地理空间高级库（替换为mamba，保留所有指定版本）
+mamba install -c conda-forge rasterio=1.3.9 fiona=1.9.5 shapely=2.0.2 geopandas=0.14.3 -y
+
+# 5. 安装可视化/图像处理库（替换为mamba）
+mamba install -c conda-forge matplotlib opencv pillow -y
+
+# 6. PyTorch安装（适配集群私有PyPI源，保留版本+补充集群参数）
+# 如果你有NVIDIA显卡且CUDA 11.8环境：
+mamba install pytorch==2.2.2 torchvision==0.17.2 torchaudio==2.2.2 pytorch-cuda=11.8 -c pytorch
+
+# 7. 其他工具包（适配集群私有PyPI源，保留所有指定版本）
+mamba install tqdm==4.66.1 lightning==2.2.0 torchmetrics==1.3.2 whitebox==2.3.0

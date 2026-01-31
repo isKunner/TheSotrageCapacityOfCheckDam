@@ -24,7 +24,7 @@ class CheckDamPredictor:
         Initialize the predictor with trained model.
 
         Args:
-            checkpoint_path (str): Path to trained model checkpoint
+            checkpoint_path (str): LocalPath to trained model checkpoint
             class_names (list): List of class names
             device (str): Device to run prediction on
         """
@@ -73,8 +73,8 @@ class CheckDamPredictor:
         Predict segmentation mask for a single image.
 
         Args:
-            image_path (str): Path to input image
-            output_path (str): Path to save prediction result
+            image_path (str): LocalPath to input image
+            output_path (str): LocalPath to save prediction result
             show (bool): Whether to display result
 
         Returns:
@@ -155,9 +155,9 @@ class CheckDamPredictor:
         Predict segmentation mask for an image with its JSON annotation (for consistency testing).
 
         Args:
-            image_path (str): Path to input image
-            json_path (str): Path to JSON annotation file
-            output_path (str): Path to save prediction result
+            image_path (str): LocalPath to input image
+            json_path (str): LocalPath to JSON annotation file
+            output_path (str): LocalPath to save prediction result
             show (bool): Whether to display result
 
         Returns:
@@ -429,7 +429,7 @@ class CheckDamPredictor:
         Args:
             original_image (np.ndarray): Original image (RGB)
             prediction (np.ndarray): Prediction mask
-            output_path (str): Path to save visualization
+            output_path (str): LocalPath to save visualization
         """
 
         # Ensure original_image is RGB (it should be based on your loading)
@@ -515,7 +515,7 @@ class CheckDamPredictor:
             original_image (np.ndarray): Original image (RGB)
             ground_truth (np.ndarray): Ground truth mask
             prediction (np.ndarray): Prediction mask
-            output_path (str): Path to save visualization
+            output_path (str): LocalPath to save visualization
         """
 
         # --- Helper function to create edge mask ---
@@ -685,18 +685,18 @@ def main():
     parser.add_argument('--model', type=str, default='UNet', choices=['FCN', 'UNet', 'CheckDamNet'])
     parser.add_argument('--checkpoint', type=str,
                         default=r"C:\Users\Kevin\Desktop\TheSotrageCapacityOfCheckDam\CheckDamExtraction\lightning_logs\version_1\checkpoints\epoch=99-step=12500.ckpt",
-                        help='Path to model checkpoint')
+                        help='LocalPath to model checkpoint')
     parser.add_argument('--image', type=str,
                         default=r"C:\Users\Kevin\Documents\PythonProject\CheckDam\Datasets\SpatialInfoExtraction\Google\243.tif",
-                        help='Path to input image')
+                        help='LocalPath to input image')
     parser.add_argument('--json', type=str,
                         default=r"C:\Users\Kevin\Documents\PythonProject\CheckDam\Datasets\SpatialInfoExtraction\Label\243.json",
-                        help='Path to JSON annotation file (optional)')
+                        help='LocalPath to JSON annotation file (optional)')
     parser.add_argument('--output', type=str, default='prediction_result.png',
-                        help='Path to save prediction result')
+                        help='LocalPath to save prediction result')
     parser.add_argument('--labels_file', type=str,
                         default=r"C:\Users\Kevin\Documents\PythonProject\CheckDam\Datasets\SpatialInfoExtraction\labels.txt",
-                        help='Path to labels file')
+                        help='LocalPath to labels file')
     parser.add_argument('--show', action='store_true',
                         help='Show prediction result')
     parser.add_argument('--batch', action='store_true',

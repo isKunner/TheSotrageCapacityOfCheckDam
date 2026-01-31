@@ -1,0 +1,15 @@
+name: cdse-copernicus-dem-downloader
+channels:
+  - conda-forge
+dependencies:
+  - python=3.12
+  - pandas=2.2.2
+  - regex=2024.5.15
+  - requests=2.32.3
+  - rsa=4.9
+  - yaml=0.2.5
+  - pyyaml=6.0.1
+  - colorlog=6.8.2
+  - lxml=5.2.2
+  - pykml=0.2.0
+  - antimeridian=0.3.8

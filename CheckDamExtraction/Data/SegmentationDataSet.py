@@ -25,9 +25,9 @@ class CheckDamSegmentationDataSet(Dataset):
         Args:
             label_files_list (list): List of paths to .json label files.
             class_names(list): List of class labels for segmentation. The background class will be automatically inserted at index 0 if not present in the provided list. Example: ['background', 'check_dam', 'silted_land'].
-            img_dir (str, optional): Path to the directory containing images.
+            img_dir (str, optional): LocalPath to the directory containing images.
                                      If None, assumed to be same as lbl_dir or derived from json.
-            lbl_dir (str, optional): Path to the directory containing .json files.
+            lbl_dir (str, optional): LocalPath to the directory containing .json files.
                                      Defaults to LABEL_ROOT_PATH.
             transform (callable, optional): Optional transform to be applied on a sample. Transform is a callable that accepts two parameters (image, mask).
         """

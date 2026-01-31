@@ -1,0 +1,8 @@
+# Ignore DepthAnything output and cache directories
+DepthAnything/remote_img_results/
+DepthAnything/Test/
+DepthAnything/checkpoints/
+DepthAnything_v1/
+Depth-Anything-3/*.docx
+*.pdf
+*.zip

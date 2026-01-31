@@ -1,0 +1,11 @@
+S2A_MSIL1C_20240712T102601_N0510_R108_T32UMA_20240712T154912.SAFE # Frankfurt, Germany, SAFE format
+01XEP # Does not exist
+34SCH # Mediterranean open Sea
+24TWL # Atlantic open Sea
+24XWT # Very high Latitude
+01KAB # Fidji ante meridian
+01WCP # Siberia North ante meridian
+33KWP # Gobabeb, Namibia
+30SYJ # Valencia, Spain
+58CEU # Erebus 1, Antarctica
+58CEV # Erebus 2, Antarctica

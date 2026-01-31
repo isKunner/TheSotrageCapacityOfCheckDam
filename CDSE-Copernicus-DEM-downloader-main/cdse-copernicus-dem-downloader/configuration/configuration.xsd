@@ -1,0 +1,58 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema">
+	<xs:element name="DEM_DOWNLOADER_CONFIGURATION_FILE">
+        <xs:complexType>
+			<xs:sequence>
+				<xs:element ref="DEM_Option"/>
+			</xs:sequence>
+		</xs:complexType>
+    </xs:element>
+    <xs:element name="DEM_Option">
+        <xs:complexType>
+            <xs:sequence>
+                <xs:element ref="Resolution"/>
+                <xs:element ref="Collection"/>
+				<xs:element ref="Elevation_Model"/>
+				<xs:element ref="Tiles_Input_File"/>
+				<xs:element ref="DEM_Output_Directory"/>
+            </xs:sequence>
+        </xs:complexType>
+	</xs:element>
+    <xs:element name="Resolution">
+		<xs:simpleType>
+			<xs:restriction base="xs:string">
+				<xs:enumeration value="DEFAULT"/>
+				<xs:enumeration value="90"/>
+				<xs:enumeration value="30"/>
+			</xs:restriction>
+		</xs:simpleType>
+	</xs:element>
+    <xs:element name="Collection">
+		<xs:simpleType>
+			<xs:restriction base="xs:string">
+				<xs:enumeration value="COP-DEM"/>
+			</xs:restriction>
+		</xs:simpleType>
+	</xs:element>
+	<xs:element name="Elevation_Model">
+		<xs:simpleType>
+			<xs:restriction base="xs:string">
+				<xs:enumeration value="DEFAULT"/>
+				<xs:enumeration value="DGED"/>
+				<xs:enumeration value="DTED"/>
+			</xs:restriction>
+		</xs:simpleType>
+	</xs:element>
+	<xs:element name="Tiles_Input_File">
+		<xs:simpleType>
+			<xs:restriction base="xs:string">
+			</xs:restriction>
+		</xs:simpleType>
+	</xs:element>
+	<xs:element name="DEM_Output_Directory">
+		<xs:simpleType>
+			<xs:restriction base="xs:string">
+			</xs:restriction>
+		</xs:simpleType>
+	</xs:element>
+</xs:schema>

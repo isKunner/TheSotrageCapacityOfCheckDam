@@ -19,6 +19,7 @@ def wang_mao_gou_with_2m_data():
     buffer_distance_meters = 1
     group_distance_meters = 2
     angle_threshold_deg = 10
+    duplicate_check_logic = "OR"
 
     args = argparse.Namespace(
         json_label_dir=json_dir,
@@ -28,7 +29,8 @@ def wang_mao_gou_with_2m_data():
         overlap_threshold=overlap_threshold,
         buffer_distance_meters=buffer_distance_meters,
         group_distance_meters=group_distance_meters,
-        angle_threshold_deg=angle_threshold_deg
+        angle_threshold_deg=angle_threshold_deg,
+        duplicate_check_logic=duplicate_check_logic
     )
 
     process_labels_from_jsons_to_gdf(args)
