@@ -3,6 +3,9 @@ DepthAnything/remote_img_results/
 DepthAnything/Test/
 DepthAnything/checkpoints/
 DepthAnything_v1/
-Depth-Anything-3/*.docx
+Depth-Anything-3/
+*.docx
 *.pdf
 *.zip
+DatasetsEstablish/create_silted_land_label_from_shp.py
+DatasetsEstablish/generate_check_dam_shp_from_label.py

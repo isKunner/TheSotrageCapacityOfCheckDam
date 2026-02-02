@@ -5,29 +5,25 @@
 # @Author  : Kevin
 # @Describe:
 import os
-import re
-import shutil
-from zipfile import ZipFile
+from multiprocessing import freeze_support
+from DepthAnything.src import train_sr_model
+from LocalPath import dam_root_path
 
-dem_files = os.listdir(r"D:\研究文件\ResearchData\USA\CopernicusDEM\GeoDAR_v11_dams_of_USA_group15")
-
-for dem_file in dem_files:
-
-    if not dem_file.endswith(".zip"):
-        continue
-
-    print(dem_file)
-
-    with ZipFile(os.path.join(r"D:\研究文件\ResearchData\USA\CopernicusDEM\GeoDAR_v11_dams_of_USA_group15", dem_file)) as zip_object:
-        for member in zip_object.namelist():
-            if re.match(r".*DEM.tif$", member) or re.match(r".*DEM.dt[12]$", member):
-                filename = os.path.basename(member)
-                # skip directories
-                if not filename:
-                    continue
-                # copy file (taken from zipfile's extract)
-                source = zip_object.open(member)
-                target = open(os.path.join(r"D:\研究文件\ResearchData\USA\CopernicusDEM\GeoDAR_v11_dams_of_USA_group15", filename), "wb")
-                with source, target:
-                    shutil.copyfileobj(source, target)
-
+if __name__ == '__main__':
+    freeze_support()
+    train_sr_model(data_dir=dam_root_path,
+                   cache_dir=os.path.join(dam_root_path, "data_cache_zscore"),
+                   batch_size=1,
+                   num_workers=4,
+                   device='cuda',
+                   use_amp=True,
+                   num_prototypes=4,
+                   embedding_dim=4,
+                   sr_channels=8,
+                   sr_residual_blocks=2,
+                   mapper_base_channels=8,
+                   checkpoints_dir=r"./DepthAnything/checkpoints",
+                   save_dir=r"./DepthAnything/checkpoints",
+                   log_dir=r"./DepthAnything/logs",
+                   val_freq=2,
+                   save_freq=2)

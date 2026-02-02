@@ -21,7 +21,7 @@ sys.path.append(osp.join(osp.dirname(current_file_path), ".."))
 from LocalPath import (
     dam_root_path, dam_google_remote_root_path,
     dam_copernicus_dem_root_path,
-    dam_usgs_dem_down_link, dam_usgs_dem_down_file, dam_usgs_dem_delete_info
+    dam_usgs_dem_down_link_file, dam_usgs_dem_down_file, dam_usgs_dem_delete_info
 )
 
 
