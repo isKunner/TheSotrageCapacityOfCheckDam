@@ -1,26 +1,26 @@
 """
-超分辨率重构模型
+改进的超分辨率重构模型 V2
 
-包含两个主要组件：
-1. 添加AdaptiveBiasFusion模块，根据LRDEM自适应调整偏置项
-2. HRDEMToLRDEMMapper添加真正的下采样功能
-3. 改进融合策略，更好地结合Copernicus DEM、relative map和instance bias
+主要改进：
+1. 重命名 prototype_alphas 为 prototype_detail_strength，语义更清晰
+2. 添加可视化功能
+3. 改进融合公式注释
 """
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+
 class ResidualBlock(nn.Module):
-    """残差块"""
     def __init__(self, channels):
-        super(ResidualBlock, self).__init__()
+        super().__init__()
         self.conv1 = nn.Conv2d(channels, channels, kernel_size=3, padding=1)
         self.bn1 = nn.BatchNorm2d(channels)
         self.relu = nn.ReLU(inplace=True)
         self.conv2 = nn.Conv2d(channels, channels, kernel_size=3, padding=1)
         self.bn2 = nn.BatchNorm2d(channels)
-    
+
     def forward(self, x):
         residual = x
         out = self.relu(self.bn1(self.conv1(x)))
@@ -31,13 +31,12 @@ class ResidualBlock(nn.Module):
 
 
 class ConvBlock(nn.Module):
-    """卷积块"""
     def __init__(self, in_channels, out_channels, kernel_size=3, stride=1, padding=1):
-        super(ConvBlock, self).__init__()
+        super().__init__()
         self.conv = nn.Conv2d(in_channels, out_channels, kernel_size, stride, padding)
         self.bn = nn.BatchNorm2d(out_channels)
         self.relu = nn.ReLU(inplace=True)
-    
+
     def forward(self, x):
         return self.relu(self.bn(self.conv(x)))
 
@@ -134,6 +133,7 @@ class AdaptiveBiasFusion(nn.Module):
         return fused_features, modulation_weights
 
 
+
 class InstanceGuidedAttention(nn.Module):
     """
     实例引导的注意力模块（改进版）
@@ -185,46 +185,70 @@ class InstanceGuidedAttention(nn.Module):
 
 class SuperResolutionNetwork(nn.Module):
     """
-    改进的超分辨率重构网络
+    改进的超分辨率重构网络 V2
 
-    主要改进：
-    1. 添加AdaptiveBiasFusion模块实现自适应偏置融合
-    2. 改进特征提取和融合策略
-    3. 更好地利用LRDEM指导relative map和instance bias的融合
+    核心设计：
+    ==========
 
-    输入：
-    - copernicus_dem: (B, 1, H, W) - 低分辨率DEM（30m重采样到1m）
-    - relative_map: (B, 1, H, W) - DAM生成的相对深度图
-    - instance_bias_map: (B, 1, H, W) - 实例偏置图（可选，默认为None）
+    融合策略（每个实例）：
 
-    输出：
-    - hrdem: (B, 1, H, W) - 高分辨率DEM
+    1. 高程对齐（Elevation Alignment）
+       - 目标：让Relative和Copernicus在实例级均值相同
+       - 实现：offset = Copernicus_mean - Relative_mean
+       - 输出：Relative_aligned = Relative + offset
+
+    2. 细节调制（Detail Modulation）
+       - 目标：控制Relative的细节贡献程度
+       - 实现：detail_strength（0=听Copernicus, 1=听Relative）
+       - 输出：Mixed = Copernicus + detail_strength * (Relative_aligned - Copernicus)
+
+    3. 空间精修（Spatial Refinement）
+       - 目标：网络学习局部精修
+       - 实现：delta = Network(Mixed)
+       - 输出：HRDEM = Mixed + delta
     """
 
     def __init__(
-            self,
-            in_channels=3,  # Copernicus DEM + relative map + instance bias (可选)
-            base_channels=64,
-            num_residual_blocks=8,
-            out_channels=1,
-            use_instance_guidance=True,
-            use_adaptive_fusion=True
+        self,
+        in_channels=3,
+        base_channels=64,
+        num_residual_blocks=8,
+        out_channels=1,
+        use_instance_guidance=True,
+        use_adaptive_fusion=False,
+        use_scale_dominance=True,
+        scale_factor=30,
+        num_prototypes=128,
     ):
-        super(SuperResolutionNetwork, self).__init__()
+        super().__init__()
 
         self.use_instance_guidance = use_instance_guidance
+        self.use_scale_dominance = use_scale_dominance
         self.use_adaptive_fusion = use_adaptive_fusion
+        self.scale_factor = scale_factor
+        self.num_prototypes = num_prototypes
 
-        # 初始特征提取（3通道输入：DEM + relative + instance bias）
-        self.initial_conv = ConvBlock(in_channels, base_channels, kernel_size=7, padding=3)
+        # 实例级细节强度（每个原型学习一个细节强度）
+        # 初始化为0，Sigmoid后=0.5，让网络自己学习
+        if self.use_scale_dominance:
+            self.prototype_detail_strength = nn.Parameter(torch.zeros(num_prototypes))
 
-        # 自适应偏置融合模块
-        if self.use_adaptive_fusion:
-            self.adaptive_fusion = AdaptiveBiasFusion(base_channels)
+            # 融合后的特征提取
+            self.fused_features = nn.Sequential(
+                ConvBlock(1, base_channels, kernel_size=3, padding=1),
+                ConvBlock(base_channels, base_channels, kernel_size=3, padding=1),
+            )
 
         # 实例引导注意力模块
         if self.use_instance_guidance:
             self.instance_attention = InstanceGuidedAttention(base_channels)
+
+        if self.use_adaptive_fusion:
+            self.adaptive_fusion = AdaptiveBiasFusion(base_channels)
+
+        # 初始特征提取（备用方案）
+        if not self.use_scale_dominance:
+            self.initial_conv = ConvBlock(in_channels, base_channels, kernel_size=7, padding=3)
 
         # 残差块
         self.residual_blocks = nn.ModuleList([
@@ -239,13 +263,14 @@ class SuperResolutionNetwork(nn.Module):
 
         # 上采样和重构层
         self.reconstruction = nn.Sequential(
-            ConvBlock(base_channels, base_channels * 2),
-            nn.Conv2d(base_channels * 2, base_channels, kernel_size=3, padding=1),
+            ConvBlock(base_channels, base_channels),
+            nn.Conv2d(base_channels, base_channels // 2, kernel_size=3, padding=1),
+            nn.BatchNorm2d(base_channels // 2),
             nn.ReLU(inplace=True),
-            nn.Conv2d(base_channels, out_channels, kernel_size=3, padding=1)
+            nn.Conv2d(base_channels // 2, out_channels, kernel_size=3, padding=1)
         )
 
-        # 残差连接权重（针对不同区域的可学习权重）
+        # 残差连接权重
         self.residual_weight = nn.Parameter(torch.tensor(0.1))
 
         # 实例感知的残差权重
@@ -257,7 +282,7 @@ class SuperResolutionNetwork(nn.Module):
                 nn.Sigmoid()
             )
 
-    def forward(self, copernicus_dem, relative_map, instance_bias_map=None):
+    def forward(self, copernicus_dem, relative_map, instance_bias_map=None, prototype_activations=None):
         """
         前向传播
 
@@ -265,127 +290,160 @@ class SuperResolutionNetwork(nn.Module):
             copernicus_dem: (B, 1, H, W) - 低分辨率DEM
             relative_map: (B, 1, H, W) - 相对深度图
             instance_bias_map: (B, 1, H, W) - 实例偏置图（可选）
+            prototype_activations: (B, num_prototypes, H, W) - 原型激活图
 
         Returns:
             hrdem: (B, 1, H, W) - 高分辨率DEM
-            modulation_weights: (B, 1, H, W) - 调制权重（用于可视化）
+            detail_strength_map: (B, 1, H, W) - 细节强度图（用于可视化）
+            fusion_info: dict - 融合过程的中间结果（用于可视化）
         """
-        # 拼接输入
-        if instance_bias_map is not None and self.use_instance_guidance:
-            x = torch.cat([copernicus_dem, relative_map, instance_bias_map], dim=1)  # (B, 3, H, W)
+        B, _, H, W = copernicus_dem.shape
+        detail_strength_map = None
+        fusion_info = {}
+
+        # ========== 第1步：实例级高程融合 ==========
+        if self.use_scale_dominance and prototype_activations is not None:
+            num_proto = prototype_activations.shape[1]
+
+            # 动态调整detail_strength到匹配的原型数量
+            strengths_full = torch.sigmoid(self.prototype_detail_strength)
+            if num_proto <= self.num_prototypes:
+                strengths = strengths_full[:num_proto]
+            else:
+                mean_val = strengths_full.mean()
+                strengths = torch.cat([strengths_full, mean_val.expand(num_proto - self.num_prototypes)], dim=0)
+
+            # 计算每个像素的细节强度
+            detail_strength = (strengths.view(1, -1, 1, 1) * prototype_activations).sum(dim=1, keepdim=True)
+            detail_strength_map = detail_strength
+
+            # 保存用于可视化
+            fusion_info['detail_strength'] = detail_strength
+            fusion_info['prototype_strengths'] = strengths
+
+            # 实例级均值对齐
+            cop_expanded = copernicus_dem.expand(B, num_proto, H, W)
+            rel_expanded = relative_map.expand(B, num_proto, H, W)
+
+            # 每个原型的掩码权重
+            weights = prototype_activations / (prototype_activations.sum(dim=(2,3), keepdim=True) + 1e-6)
+
+            # 实例级均值
+            cop_means = (cop_expanded * weights).sum(dim=(2,3), keepdim=True)
+            rel_means = (rel_expanded * weights).sum(dim=(2,3), keepdim=True)
+
+            # 均值差异
+            mean_offsets = cop_means - rel_means
+            offsets = (mean_offsets * prototype_activations).sum(dim=1, keepdim=True)
+            relative_aligned = relative_map + offsets
+
+            fusion_info['mean_offsets'] = mean_offsets
+            fusion_info['relative_aligned'] = relative_aligned
+
+            # 残差融合
+            residual = relative_aligned - copernicus_dem
+            mixed = copernicus_dem + detail_strength * residual
+
+            fusion_info['residual'] = residual
+            fusion_info['mixed'] = mixed
+
         else:
-            x = torch.cat([copernicus_dem, relative_map], dim=1)  # (B, 2, H, W)
-            if instance_bias_map is not None:
-                x = torch.cat([x, instance_bias_map], dim=1)
+            mixed = copernicus_dem
+            fusion_info['mixed'] = mixed
 
-        # 初始特征提取
-        x = self.initial_conv(x)
+        # ========== 第2步：提取特征 ==========
+        if self.use_scale_dominance and prototype_activations is not None:
+            x = self.fused_features(mixed)
+        else:
+            if instance_bias_map is not None and self.use_instance_guidance:
+                x = torch.cat([copernicus_dem, relative_map, instance_bias_map], dim=1)
+            else:
+                x = torch.cat([copernicus_dem, relative_map], dim=1)
+                if instance_bias_map is not None:
+                    x = torch.cat([x, instance_bias_map], dim=1)
+            x = self.initial_conv(x)
 
-        # 保存残差
-        residual = x
+        # ========== 第3步：特征精修 ==========
+        skip = x
 
-        modulation_weights = None
-
-        # 应用自适应偏置融合
         if self.use_adaptive_fusion and instance_bias_map is not None:
-            x, modulation_weights = self.adaptive_fusion(
-                x, copernicus_dem, relative_map, instance_bias_map
-            )
+            x, _ = self.adaptive_fusion(x, copernicus_dem, relative_map, instance_bias_map)
 
-        # 应用实例引导注意力
+        # 实例引导注意力（空间选择）
         if instance_bias_map is not None and self.use_instance_guidance:
             x = self.instance_attention(x, instance_bias_map)
 
-        # 残差块
         for block in self.residual_blocks:
             x = block(x)
 
-        # 特征融合
         x = self.fusion_conv(x)
+        x = x + skip
 
-        # 添加残差连接
-        x = x + residual
+        # 重构：预测精修量delta
+        delta = self.reconstruction(x)
 
-        # 重构
-        x = self.reconstruction(x)
-
-        # 实例感知的残差权重
+        # ========== 第4步：最终融合 ==========
         if instance_bias_map is not None and self.use_instance_guidance:
-            # 根据instance bias生成自适应权重
             adaptive_weight = self.instance_adaptive_weight(instance_bias_map)
-            # 结合全局权重和自适应权重
             effective_weight = self.residual_weight * (1 + adaptive_weight)
-            hrdem = copernicus_dem + effective_weight * x
         else:
-            # 使用全局残差权重
-            hrdem = copernicus_dem + self.residual_weight * x
+            effective_weight = self.residual_weight
 
-        return hrdem, modulation_weights
+        hrdem = mixed + effective_weight * delta
+
+        fusion_info['delta'] = delta
+        fusion_info['effective_weight'] = effective_weight
+
+        return hrdem, detail_strength_map, fusion_info
 
 
 class HRDEMToLRDEMMapper(nn.Module):
     """
-    改进的HRDEM到LRDEM的映射网络（可学习降采样核）
+    改进的HRDEM到LRDEM的映射网络 V2
 
-    主要改进：
-    1. 使用可学习降采样核，结合HRDEM和Bias Map进行深度引导
-    2. 空洞卷积扩大感受野，适应30倍下采样
-    3. 空间注意力根据地形复杂度调整退化强度
-
-    输入：
-    - hrdem: (B, 1, H, W) - 高分辨率DEM（融合后的绝对高程）
-    - instance_bias_map: (B, 1, H, W) - 实例偏置图（地形类型/复杂度）
-
-    输出：
-    - lrdem: (B, 1, H//scale_factor, W//scale_factor) - 模拟的低分辨率DEM
+    改进：
+    1. 处理非整数倍下采样
+    2. 添加可视化功能
     """
 
     def __init__(
-            self,
-            in_channels=2,  # HRDEM + Bias Map
-            base_channels=16,
-            scale_factor=30,  # 下采样倍率
+        self,
+        in_channels=2,
+        base_channels=16,
+        scale_factor=30,
     ):
-        super(HRDEMToLRDEMMapper, self).__init__()
+        super().__init__()
 
         self.scale_factor = scale_factor
 
-        # 1. 浅层特征提取
+        # 特征提取
         self.feature_extractor = nn.Sequential(
             ConvBlock(in_channels, base_channels, kernel_size=3, padding=1),
             ConvBlock(base_channels, base_channels, kernel_size=3, padding=1),
         )
 
-        # 2. 空间注意力（根据bias map决定关注区域）
+        # 空间注意力
         self.spatial_attention = nn.Sequential(
             nn.Conv2d(base_channels, 1, kernel_size=3, padding=1),
             nn.Sigmoid()
         )
 
-        # 3. 可学习降采样核（使用空洞卷积捕获不同尺度的退化模式）
-        # 1022 -> 511 -> 255 -> 127 -> 63 -> 32 (约30倍)
+        # 可学习降采样核
         self.downsample_conv = nn.Sequential(
-            # 第一层：stride=2 下采样
             ConvBlock(base_channels, base_channels * 2, kernel_size=3, stride=2, padding=1),
-            # 空洞卷积扩大感受野
-            nn.Conv2d(base_channels * 2, base_channels * 2, kernel_size=3, 
-                     dilation=2, padding=2, bias=False),
+            nn.Conv2d(base_channels * 2, base_channels * 2, kernel_size=3, dilation=2, padding=2, bias=False),
             nn.BatchNorm2d(base_channels * 2),
             nn.ReLU(inplace=True),
-            
-            # 第二层：stride=2 下采样
+
             ConvBlock(base_channels * 2, base_channels * 2, kernel_size=3, stride=2, padding=1),
-            # 空洞卷积
-            nn.Conv2d(base_channels * 2, base_channels * 2, kernel_size=3,
-                     dilation=2, padding=2, bias=False),
+            nn.Conv2d(base_channels * 2, base_channels * 2, kernel_size=3, dilation=2, padding=2, bias=False),
             nn.BatchNorm2d(base_channels * 2),
             nn.ReLU(inplace=True),
-            
-            # 第三层：stride=2 下采样
+
             ConvBlock(base_channels * 2, base_channels, kernel_size=3, stride=2, padding=1),
         )
 
-        # 4. 自适应输出层
+        # 输出层
         self.output_conv = nn.Conv2d(base_channels, 1, kernel_size=1)
 
     def forward(self, hrdem, instance_bias_map, target_size=None):
@@ -400,79 +458,75 @@ class HRDEMToLRDEMMapper(nn.Module):
         Returns:
             lrdem: (B, 1, H', W') - 模拟的低分辨率DEM
         """
-        # 拼接输入：HRDEM + Bias Map
         x = torch.cat([hrdem, instance_bias_map], dim=1)
 
-        # 特征提取
         features = self.feature_extractor(x)
 
-        # 空间注意力加权
         attention = self.spatial_attention(features)
         features = features * attention
 
-        # 可学习降采样
         x = self.downsample_conv(features)
 
         # 精确调整到目标尺寸
         if target_size is not None:
             x = F.adaptive_avg_pool2d(x, target_size)
         else:
-            # 计算目标尺寸
             H, W = hrdem.shape[-2:]
-            target_h = H // self.scale_factor
-            target_w = W // self.scale_factor
+            # 使用round处理非整数倍下采样
+            target_h = max(1, round(H / self.scale_factor))
+            target_w = max(1, round(W / self.scale_factor))
             x = F.adaptive_avg_pool2d(x, (target_h, target_w))
 
-        # 输出
         lrdem = self.output_conv(x)
         return lrdem
 
 
 class DEMSuperResolutionSystem(nn.Module):
-    """
-    改进的DEM超分辨率系统
-
-    整合所有组件：
-    1. DAM模型（带自适应实例分割）
-    2. 超分辨率重构网络（带自适应偏置融合）
-    3. HRDEM到LRDEM的映射网络（带真正下采样）
-    """
+    """改进的DEM超分辨率系统 V2"""
 
     def __init__(
-            self,
-            dam_model,
-            sr_channels=64,
-            sr_residual_blocks=8,
-            mapper_base_channels=32,
-            mapper_scale_factor=30,
-            use_instance_guidance=True,
-            use_adaptive_fusion=True
+        self,
+        dam_model,
+        sr_channels=64,
+        sr_residual_blocks=8,
+        mapper_base_channels=32,
+        mapper_scale_factor=30,
+        use_instance_guidance=True,
+        use_scale_dominance=True,
+        use_cached_dam_encoder=False,
+        use_adaptive_fusion=False,
+        num_prototypes=128,
     ):
-        super(DEMSuperResolutionSystem, self).__init__()
+        super().__init__()
 
-        # DAM模型（带自适应实例分割）
         self.dam_model = dam_model
+        self.use_cached_dam_encoder = use_cached_dam_encoder
+        self.num_prototypes = num_prototypes
 
-        # 超分辨率重构网络（支持自适应偏置融合）
+        # 超分辨率重构网络
         self.sr_network = SuperResolutionNetwork(
-            in_channels=3,  # Copernicus + relative + instance bias
+            in_channels=3,
             base_channels=sr_channels,
             num_residual_blocks=sr_residual_blocks,
             out_channels=1,
             use_instance_guidance=use_instance_guidance,
-            use_adaptive_fusion=use_adaptive_fusion
+            use_scale_dominance=use_scale_dominance,
+            use_adaptive_fusion=use_adaptive_fusion,
+            scale_factor=mapper_scale_factor,
+            num_prototypes=num_prototypes,
         )
 
-        # HRDEM到LRDEM的映射网络（带真正下采样）
+        # HR到LR映射
         self.mapper_network = HRDEMToLRDEMMapper(
-            in_channels=2,  # HRDEM + Bias Map
+            in_channels=2,
             base_channels=mapper_base_channels,
             scale_factor=mapper_scale_factor
         )
 
         self.mapper_scale_factor = mapper_scale_factor
 
-    def forward(self, google_image, copernicus_dem, use_instance_guidance=True, return_modulation=False):
+    def forward(self, google_image, copernicus_dem, use_instance_guidance=True,
+                return_fusion_info=False, dam_encoder_features=None):
         """
         前向传播
 
@@ -480,36 +534,50 @@ class DEMSuperResolutionSystem(nn.Module):
             google_image: (B, 3, H, W) - Google Earth影像
             copernicus_dem: (B, 1, H, W) - Copernicus DEM
             use_instance_guidance: bool - 是否使用实例引导
-            return_modulation: bool - 是否返回调制权重
+            return_fusion_info: bool - 是否返回融合过程的中间结果
+            dam_encoder_features: Dict - 预计算的DAM Encoder特征
 
         Returns:
-            包含以下键的字典：
-            - 'hrdem': 高分辨率DEM
-            - 'mapped_lrdem': 映射后的低分辨率DEM
-            - 'dam_output': DAM模型的完整输出
-            - 'modulation_weights': 调制权重（如果return_modulation=True）
+            result: dict 包含以下键：
+                - 'hrdem': 高分辨率DEM
+                - 'mapped_lrdem': 映射后的低分辨率DEM
+                - 'dam_output': DAM模型的完整输出
+                - 'detail_strength_map': 细节强度图
+                - 'fusion_info': 融合过程的中间结果（如果return_fusion_info=True）
         """
         B, _, H, W = copernicus_dem.shape
 
-        # DAM模型生成relative map（带实例分割增强）
-        dam_output = self.dam_model(google_image)
-        enhanced_depth = dam_output['enhanced_depth'].unsqueeze(1)  # (B, 1, H, W)
-        instance_bias_map = dam_output['instance_bias_map'].unsqueeze(1)  # (B, 1, H, W)
+        # DAM模型
+        if self.use_cached_dam_encoder and dam_encoder_features is not None:
+            if isinstance(dam_encoder_features, dict):
+                features = dam_encoder_features.get('features', [])
+                patch_h = dam_encoder_features.get('patch_h', H // 14)
+                patch_w = dam_encoder_features.get('patch_w', W // 14)
+            elif isinstance(dam_encoder_features, (list, tuple)):
+                features = dam_encoder_features
+                patch_h, patch_w = H // 14, W // 14
 
-        # 超分辨率重构网络融合Copernicus DEM、relative map和instance bias
+            dam_output = self.dam_model.forward_from_features(features, patch_h, patch_w)
+        else:
+            dam_output = self.dam_model(google_image)
+
+        enhanced_depth = dam_output['enhanced_depth'].unsqueeze(1)
+        instance_bias_map = dam_output['instance_bias_map'].unsqueeze(1)
+        prototype_activations = dam_output.get('prototype_activations', None)
+
+        # 超分辨率重构
         if use_instance_guidance and self.sr_network.use_instance_guidance:
-            hrdem, modulation_weights = self.sr_network(
-                copernicus_dem, enhanced_depth, instance_bias_map
+            hrdem, detail_strength_map, fusion_info = self.sr_network(
+                copernicus_dem, enhanced_depth, instance_bias_map, prototype_activations
             )
         else:
-            hrdem, modulation_weights = self.sr_network(
-                copernicus_dem, enhanced_depth, None
+            hrdem, detail_strength_map, fusion_info = self.sr_network(
+                copernicus_dem, enhanced_depth, None, prototype_activations
             )
 
-        # 映射网络将HRDEM映射回LRDEM（下采样）
-        # 输入：HRDEM + Instance Bias Map（深度引导的降采样）
-        target_h = H // self.mapper_scale_factor
-        target_w = W // self.mapper_scale_factor
+        # HR到LR映射
+        target_h = max(1, round(H / self.mapper_scale_factor))
+        target_w = max(1, round(W / self.mapper_scale_factor))
         mapped_lrdem = self.mapper_network(
             hrdem, instance_bias_map, target_size=(target_h, target_w)
         )
@@ -518,62 +586,36 @@ class DEMSuperResolutionSystem(nn.Module):
             'dam_dem': enhanced_depth,
             'hrdem': hrdem,
             'mapped_lrdem': mapped_lrdem,
-            'dam_output': dam_output
+            'dam_output': {
+                'enhanced_depth': dam_output['enhanced_depth'],
+                'instance_bias_map': dam_output['instance_bias_map'],
+                'prototype_activations': dam_output.get('prototype_activations', None),
+                'base_biases': dam_output.get('base_biases', None),
+                'spatial_residual': dam_output.get('spatial_residual', None),
+            },
+            'detail_strength_map': detail_strength_map,
         }
 
-        if return_modulation and modulation_weights is not None:
-            result['modulation_weights'] = modulation_weights
+        if return_fusion_info:
+            result['fusion_info'] = fusion_info
 
         return result
 
-    def freeze_dam(self):
-        """冻结DAM模型的参数（除了实例分割头）"""
-        for param in self.dam_model.parameters():
-            param.requires_grad = False
-
-        # 解冻实例分割头
-        for param in self.dam_model.instance_head.parameters():
-            param.requires_grad = True
-
-        # 解冻归一化参数
-        self.dam_model.norm_min.requires_grad = True
-        self.dam_model.norm_max.requires_grad = True
-
-        print("DAM模型已冻结（除实例分割头外）")
-
-    def unfreeze_dam(self):
-        """解冻DAM模型的所有参数"""
-        for param in self.dam_model.parameters():
-            param.requires_grad = True
-        print("DAM模型已解冻")
-
 
 def create_super_resolution_system(
-        dam_model,
-        sr_channels=64,
-        sr_residual_blocks=8,
-        mapper_base_channels=32,
-        mapper_scale_factor=30,
-        use_instance_guidance=True,
-        use_adaptive_fusion=True,
-        device='cuda'
+    dam_model,
+    sr_channels=64,
+    sr_residual_blocks=8,
+    mapper_base_channels=32,
+    mapper_scale_factor=30,
+    use_instance_guidance=True,
+    use_scale_dominance=True,
+    use_adaptive_fusion=False,
+    device='cuda',
+    use_cached_dam_encoder=False,
+    num_prototypes=128,
 ):
-    """
-    创建超分辨率系统
-
-    Args:
-        dam_model: DAM模型实例
-        sr_channels: 超分辨率网络的基础通道数
-        sr_residual_blocks: 超分辨率网络的残差块数量
-        mapper_base_channels: 映射网络的基础通道数
-        mapper_scale_factor: 映射网络的下采样倍率
-        use_instance_guidance: 是否使用实例引导
-        use_adaptive_fusion: 是否使用自适应偏置融合
-        device: 设备
-
-    Returns:
-        system: DEM超分辨率系统
-    """
+    """创建改进的超分辨率系统 V2"""
     system = DEMSuperResolutionSystem(
         dam_model=dam_model,
         sr_channels=sr_channels,
@@ -581,9 +623,10 @@ def create_super_resolution_system(
         mapper_base_channels=mapper_base_channels,
         mapper_scale_factor=mapper_scale_factor,
         use_instance_guidance=use_instance_guidance,
+        use_scale_dominance=use_scale_dominance,
+        use_cached_dam_encoder=use_cached_dam_encoder,
+        num_prototypes=num_prototypes,
         use_adaptive_fusion=use_adaptive_fusion,
     )
-
     system = system.to(device)
-
     return system

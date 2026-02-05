@@ -14,18 +14,18 @@ import pandas as pd
 
 from DEMAndRemoteSensingUtils import merge_geo_referenced_tifs, crop_source_to_reference, merge_sources_to_reference
 
-def generation_usgs(google_remote_root_dir, usgs_dem_index_dir, dam_usgs_dem_down_file, usgs_dem_root_path, is_delete_file=False, usgs_dem_delete_info=None):
+def generation_usgs(google_remote_root_dir, usgs_dem_index_file, dam_usgs_dem_down_file, usgs_dem_root_path, is_delete_file=False, usgs_dem_delete_info=None):
 
     """
 
     :param google_remote_root_dir: Get the range you want to crop
-    :param usgs_dem_index_dir: Each file to be cropped needs a DEM to be downloaded
+    :param usgs_dem_index_file: Each file to be cropped needs a DEM to be downloaded
     :param dam_usgs_dem_down_file: Path to download DEM
     :param usgs_dem_root_path: Save the path of the cropped DEM
     :return:
     """
 
-    with open(usgs_dem_index_dir, 'r', encoding='utf-8') as f:
+    with open(usgs_dem_index_file, 'r', encoding='utf-8') as f:
         download_link = json.load(f)
 
     for key, value in download_link.items():

@@ -12,7 +12,8 @@ from .dataset import (
     DEMSuperResolutionDataset,
     collect_valid_samples,
     collect_test_samples,
-    create_dataloaders
+    create_dataloaders,
+    _collate_fn_filter_none,
 )
 
 from .cached_dataset import (
@@ -34,6 +35,7 @@ __all__ = [
     'collect_valid_samples',
     'collect_test_samples',
     'create_dataloaders',
+    '_collate_fn_filter_none',
     # 缓存数据集
     'CachedDEMDataset',
     'create_dataloaders_with_cache',

@@ -6,11 +6,15 @@
 # @Describe:
 
 import os
+import time
+from os import times
+
 from DatasetsEstablish.USGSDEMDownloader import usgs_down_index, usgs_load_file, check_load_file, \
     generate_html_for_usgs_down
 from DatasetsEstablish.CDSECopernicusDEMDownloader import download_copernicus
+from DatasetsEstablish.USGSDEMDownloader.USGS_down_process import generation_usgs
 from LocalPath import dam_usgs_dem_index_dir, dam_google_remote_root_path, USA_States_shp, dam_usgs_dem_down_link_file, \
-    dam_usgs_dem_root_path, dam_usgs_dem_down_html_dir, dam_copernicus_dem_root_path
+    dam_usgs_dem_root_path, dam_usgs_dem_down_html_dir, dam_copernicus_dem_root_path, dam_usgs_dem_delete_info
 
 # usgs_down_index(dam_usgs_dem_index_dir)
 
@@ -21,4 +25,17 @@ from LocalPath import dam_usgs_dem_index_dir, dam_google_remote_root_path, USA_S
 
 # generate_html_for_usgs_down(dam_usgs_dem_down_link_file, dam_usgs_dem_down_html_dir)
 
-download_copernicus([os.path.join(dam_google_remote_root_path, sub_file) for sub_file in ["TX"]], [os.path.join(dam_copernicus_dem_root_path, sub_file) for sub_file in ["TX"]])
+while True:
+
+    generation_usgs(dam_google_remote_root_path,
+                    dam_usgs_dem_down_link_file,
+                    r"C:\Users\Kevin\Downloads\Edge",
+                    dam_usgs_dem_root_path,
+                    is_delete_file=True,
+                    usgs_dem_delete_info=dam_usgs_dem_delete_info
+                    )
+
+    time.sleep(10*60)
+
+# download_copernicus([os.path.join(dam_google_remote_root_path, sub_file) for sub_file in ["TX"]], [os.path.join(dam_copernicus_dem_root_path, sub_file) for sub_file in ["TX"]])-
+

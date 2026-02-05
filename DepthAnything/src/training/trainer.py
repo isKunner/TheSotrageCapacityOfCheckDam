@@ -108,6 +108,7 @@ class MultiStageTrainer:
             clear_cache_freq=10,
             amp_mode='conservative',
             initial_lr=1e-4,  # 初始学习率，用于阶段感知调度
+            use_cached_dam_encoder=False,  # 是否使用预缓存的DAM Encoder特征
     ):
         self.model = model
         self.train_loader = train_loader
@@ -124,6 +125,7 @@ class MultiStageTrainer:
         self.grad_clip = grad_clip
         self.early_stopping = early_stopping
         self.initial_lr = initial_lr
+        self.use_cached_dam_encoder = use_cached_dam_encoder
         device_str = getattr(device, 'type', str(device).lower()) if hasattr(device, 'type') else str(device).lower()
         self.use_amp = use_amp and torch.cuda.is_available() and device_str != 'cpu'
         self.clear_cache_freq = clear_cache_freq
@@ -131,11 +133,9 @@ class MultiStageTrainer:
         # 阶段配置（默认5阶段渐进式解冻）
         if stage_configs is None:
             # 默认配置
-            pretrain_epochs = max(3, int(num_epochs * 0.2))
-            warmup_epochs = max(2, int(num_epochs * 0.1))
-            joint_partial_epochs = max(2, int(num_epochs * 0.15))
-            joint_encoder_epochs = max(2, int(num_epochs * 0.15))
-            finetune_epochs = num_epochs - pretrain_epochs - warmup_epochs - joint_partial_epochs - joint_encoder_epochs
+            pretrain_epochs = max(3, int(num_epochs * 0.3))
+            warmup_epochs = max(2, int(num_epochs * 0.4))
+            joint_partial_epochs = num_epochs - pretrain_epochs - warmup_epochs
             
             self.stage_configs = {
                 'pretrain_dam': {
@@ -167,27 +167,7 @@ class MultiStageTrainer:
                     'train_mapper': True,
                     'lr_scale': 0.5,
                     'unfreeze_encoder_layers': 0,
-                },
-                'joint_encoder': {
-                    'epochs': joint_encoder_epochs,
-                    'train_dam_encoder': 'partial',
-                    'train_dam_decoder': False,
-                    'train_instance_head': True,
-                    'train_sr': True,
-                    'train_mapper': True,
-                    'lr_scale': 0.3,
-                    'unfreeze_encoder_layers': 4,  # 解冻最后4层
-                },
-                'finetune': {
-                    'epochs': finetune_epochs,
-                    'train_dam_encoder': True,
-                    'train_dam_decoder': True,
-                    'train_instance_head': True,
-                    'train_sr': True,
-                    'train_mapper': True,
-                    'lr_scale': 0.1,
-                    'unfreeze_encoder_layers': 0,
-                },
+                }
             }
         else:
             self.stage_configs = stage_configs
@@ -285,24 +265,24 @@ class MultiStageTrainer:
 
         # 配置模型参数的可训练性
         # 1. DAM Encoder
-        if config['train_dam_encoder'] == True:
-            # 全部解冻
-            for param in self.model.dam_model.pretrained.parameters():
-                param.requires_grad = True
-            print("  - DAM encoder: 全部解冻")
-        elif config['train_dam_encoder'] == 'partial':
-            # 部分解冻（最后N层）
-            total_layers = len(self.model.dam_model.pretrained.blocks)
-            unfreeze_n = config.get('unfreeze_encoder_layers', 4)
-            for i, block in enumerate(self.model.dam_model.pretrained.blocks):
-                for param in block.parameters():
-                    param.requires_grad = (i >= total_layers - unfreeze_n)
-            print(f"  - DAM encoder: 解冻最后{unfreeze_n}层")
-        else:
-            # 冻结
-            for param in self.model.dam_model.pretrained.parameters():
-                param.requires_grad = False
-            print("  - DAM encoder: 冻结")
+        if not self.use_cached_dam_encoder:
+            if config['train_dam_encoder'] == True:
+                # 全部解冻
+                for param in self.model.dam_model.pretrained.parameters():
+                    param.requires_grad = True
+                print("  - DAM encoder: 全部解冻")
+            elif config['train_dam_encoder'] == 'partial':
+                # 部分解冻（最后N层）
+                total_layers = len(self.model.dam_model.pretrained.blocks)
+                unfreeze_n = config.get('unfreeze_encoder_layers', 4)
+                for i, block in enumerate(self.model.dam_model.pretrained.blocks):
+                    for param in block.parameters():
+                        param.requires_grad = (i >= total_layers - unfreeze_n)
+                print(f"  - DAM encoder: 解冻最后{unfreeze_n}层")
+            else:
+                for param in self.model.dam_model.pretrained.parameters():
+                    param.requires_grad = False
+                print("  - DAM encoder: 冻结")
 
         # 2. DAM Decoder (depth_head)
         if config['train_dam_decoder']:
@@ -367,16 +347,28 @@ class MultiStageTrainer:
             google = batch['google'].to(self.device)
             usgs = batch['usgs'].to(self.device)
 
+            dam_encoder_features = None
+            if self.use_cached_dam_encoder and 'dam_encoder_features' in batch:
+                dam_encoder_features = batch['dam_encoder_features']
+                dam_encoder_features = [
+                    (feat[0].to(self.device), feat[1].to(self.device))
+                    for feat in dam_encoder_features
+                ]
+
             # 使用AMP进行前向传播
             if self.use_amp:
                 with autocast():
-                    output = self.model(google, copernicus)
+
+                    output = self.model(google, copernicus, dam_encoder_features=dam_encoder_features)
                     hrdem = output['hrdem']
                     mapped_lrdem = output['mapped_lrdem']
                     dam_enhanced = output['dam_output'].get('enhanced_depth', None)
                     instance_biases = output['dam_output'].get('prototype_biases', None)
                     prototypes = self.model.dam_model.instance_head.prototypes
 
+                    # 获取主导权图（如果存在）
+                    dominance_map = output.get('dominance_map', None)
+                    
                     # 计算损失
                     loss, loss_dict = self.criterion(
                         hrdem=hrdem,
@@ -385,7 +377,8 @@ class MultiStageTrainer:
                         copernicus_dem=F.adaptive_avg_pool2d(copernicus, mapped_lrdem.shape[-2:]),
                         dam_enhanced_depth=dam_enhanced,
                         instance_biases=instance_biases,
-                        prototypes=prototypes
+                        prototypes=prototypes,
+                        dominance_map=dominance_map,
                     )
 
                 # 检查损失是否为NaN
@@ -423,13 +416,15 @@ class MultiStageTrainer:
                 self.scaler.step(self.optimizer)
                 self.scaler.update()
             else:
-                # 原始训练逻辑（无AMP）
-                output = self.model(google, copernicus)
+
+                output = self.model(google, copernicus, dam_encoder_features=dam_encoder_features)
+
                 hrdem = output['hrdem']
                 mapped_lrdem = output['mapped_lrdem']
                 dam_enhanced = output['dam_output'].get('enhanced_depth', None)
                 instance_biases = output['dam_output'].get('prototype_biases', None)
                 prototypes = self.model.dam_model.instance_head.prototypes
+                dominance_map = output.get('dominance_map', None)
 
                 # 计算损失
                 loss, loss_dict = self.criterion(
@@ -439,7 +434,8 @@ class MultiStageTrainer:
                     copernicus_dem=F.adaptive_avg_pool2d(copernicus, mapped_lrdem.shape[-2:]),
                     dam_enhanced_depth=dam_enhanced,
                     instance_biases=instance_biases,
-                    prototypes=prototypes
+                    prototypes=prototypes,
+                    dominance_map=dominance_map,
                 )
 
                 # 反向传播
@@ -500,16 +496,27 @@ class MultiStageTrainer:
             google = batch['google'].to(self.device)
             usgs = batch['usgs'].to(self.device)
 
+            dam_encoder_features = None
+            if self.use_cached_dam_encoder and 'dam_encoder_features' in batch:
+                dam_encoder_features = batch['dam_encoder_features']
+                dam_encoder_features = [
+                    (feat[0].to(self.device), feat[1].to(self.device))
+                    for feat in dam_encoder_features
+                ]
+
             # 前向传播（验证时也使用AMP节省显存）
             if self.use_amp:
                 with autocast():
-                    output = self.model(google, copernicus)
+                    output = self.model(google, copernicus, dam_encoder_features=dam_encoder_features)
                     hrdem = output['hrdem']
                     mapped_lrdem = output['mapped_lrdem']
                     dam_enhanced = output['dam_output'].get('enhanced_depth', None)
                     instance_biases = output['dam_output'].get('prototype_biases', None)
                     prototypes = self.model.dam_model.instance_head.prototypes
 
+                    # 获取主导权图
+                    dominance_map = output.get('dominance_map', None)
+                    
                     # 计算损失
                     loss, loss_dict = self.criterion(
                         hrdem=hrdem,
@@ -518,15 +525,17 @@ class MultiStageTrainer:
                         copernicus_dem=F.adaptive_avg_pool2d(copernicus, mapped_lrdem.shape[-2:]),
                         dam_enhanced_depth=dam_enhanced,
                         instance_biases=instance_biases,
-                        prototypes=prototypes
+                        prototypes=prototypes,
+                        dominance_map=dominance_map,
                     )
             else:
-                output = self.model(google, copernicus)
+                output = self.model(google, copernicus, dam_encoder_features=dam_encoder_features)
                 hrdem = output['hrdem']
                 mapped_lrdem = output['mapped_lrdem']
                 dam_enhanced = output['dam_output'].get('enhanced_depth', None)
                 instance_biases = output['dam_output'].get('prototype_biases', None)
                 prototypes = self.model.dam_model.instance_head.prototypes
+                dominance_map = output.get('dominance_map', None)
 
                 # 计算损失
                 loss, loss_dict = self.criterion(
@@ -536,7 +545,8 @@ class MultiStageTrainer:
                     copernicus_dem=F.adaptive_avg_pool2d(copernicus, mapped_lrdem.shape[-2:]),
                     dam_enhanced_depth=dam_enhanced,
                     instance_biases=instance_biases,
-                    prototypes=prototypes
+                    prototypes=prototypes,
+                    dominance_map=dominance_map,
                 )
 
             # 累加损失
@@ -544,9 +554,9 @@ class MultiStageTrainer:
                 if key in loss_dict:
                     val_losses[key] += loss_dict[key]
 
-            # 计算评估指标
-            rmse = torch.sqrt(nn.MSELoss()(hrdem, usgs)).item()
-            mae = nn.L1Loss()(hrdem, usgs).item()
+            # 计算评估指标（使用函数式接口避免创建临时对象）
+            rmse = torch.sqrt(F.mse_loss(hrdem, usgs)).item()
+            mae = F.l1_loss(hrdem, usgs).item()
 
             rmse_list.append(rmse)
             mae_list.append(mae)

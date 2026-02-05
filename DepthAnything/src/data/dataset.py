@@ -243,7 +243,7 @@ class DEMSuperResolutionDataset(Dataset):
             outlier_percentile: 作为异常值裁剪的百分位数
             
         Returns:
-            normalized: 归一化后的数据
+            normalized: 归一化后的数据，如果全NoData则返回None
             mean: 均值
             std: 标准差
         """
@@ -251,20 +251,39 @@ class DEMSuperResolutionDataset(Dataset):
         data = data.copy()
         data[data <= nodata_value] = np.nan
         
-        # 计算异常值边界
-        lower = np.nanpercentile(data, outlier_percentile)
-        upper = np.nanpercentile(data, 100 - outlier_percentile)
+        # 检查是否全是 NoData
+        if np.all(np.isnan(data)):
+            return None, 0.0, 1.0
+        
+        # 检查有效数据是否全为0
+        valid_mask = ~np.isnan(data)
+        valid_data = data[valid_mask]
+        if np.all(np.abs(valid_data) < 1e-6):
+            return None, 0.0, 1.0
+        
+        # 计算异常值边界（带异常处理）
+        try:
+            lower = np.nanpercentile(data, outlier_percentile)
+            upper = np.nanpercentile(data, 100 - outlier_percentile)
+        except:
+            lower, upper = np.nanmin(data), np.nanmax(data)
         
         # 裁剪异常值（仅用于计算统计量）
         data_clipped = np.clip(data, lower, upper)
         
         # 计算稳健统计量
         mean = np.nanmean(data_clipped)
-        std = np.nanstd(data_clipped) + 1e-6
+        std = np.nanstd(data_clipped)
+        
+        # 处理 std 为 0 或 NaN 的情况
+        if std < 1e-6 or np.isnan(std) or np.isnan(mean):
+            print(f"警告: 样本标准差={std}, 均值={mean}，使用默认值")
+            std = 1.0
+            mean = 0.0
         
         # 对整个数据进行Z-score归一化
         normalized = (data - mean) / std
-        normalized = np.nan_to_num(normalized, nan=0.0)
+        normalized = np.nan_to_num(normalized, nan=0.0, posinf=0.0, neginf=0.0)
         
         return normalized.astype(np.float32), float(mean), float(std)
 
@@ -294,13 +313,11 @@ class DEMSuperResolutionDataset(Dataset):
     
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
         sample_info = self.samples[idx]
+        filename = sample_info['filename']
 
         # 读取输入数据（必须有）
         copernicus_data = self._read_tif(sample_info['copernicus_path'])
         google_data = self._read_tif(sample_info['google_path'])
-
-        # 处理 Copernicus（低分辨率DEM）
-        copernicus_data = copernicus_data.astype(np.float32)
 
         # 检查是否有USGS真值（验证模式 vs 预测模式）
         has_ground_truth = sample_info['usgs_path'] is not None and os.path.exists(sample_info['usgs_path'])
@@ -308,20 +325,39 @@ class DEMSuperResolutionDataset(Dataset):
         if has_ground_truth:
             # 验证模式：有USGS真值
             usgs_data = self._read_tif(sample_info['usgs_path'])
-            usgs_data = usgs_data.astype(np.float32)
             
-            # Z-score归一化
+            # Z-score归一化并检查是否全NoData
             copernicus_data, usgs_data, cop_stats, usgs_stats = self._normalize_dem(copernicus_data, usgs_data)
+            
+            # 检查Copernicus或USGS是否全NoData
+            if copernicus_data is None:
+                print(f"[丢弃] 文件 {filename}: Copernicus数据全为NoData")
+                return None
+            if usgs_data is None:
+                print(f"[丢弃] 文件 {filename}: USGS数据全为NoData")
+                return None
+                
             cop_mean, cop_std = cop_stats
             usgs_mean, usgs_std = usgs_stats
             usgs_tensor = torch.from_numpy(usgs_data)
         else:
             # 预测模式：无真值
             copernicus_data, _, cop_stats, _ = self._normalize_dem(copernicus_data, None)
+            
+            # 检查Copernicus是否全NoData
+            if copernicus_data is None:
+                print(f"[丢弃] 文件 {filename}: Copernicus数据全为NoData")
+                return None
+                
             cop_mean, cop_std = cop_stats
             usgs_mean, usgs_std = 0.0, 1.0
             # 创建dummy usgs tensor（保持接口一致，但实际不用）
             usgs_tensor = torch.zeros(1, self.target_size, self.target_size)
+
+        # 检查Google数据是否全为0（NoData）
+        if np.all(np.abs(google_data) < 1e-6):
+            print(f"[丢弃] 文件 {filename}: Google影像数据全为NoData")
+            return None
 
         # 处理Google影像
         google_data = google_data.astype(np.float32)
@@ -380,6 +416,20 @@ class DEMSuperResolutionDataset(Dataset):
         }
 
 
+def _collate_fn_filter_none(batch):
+    """
+    自定义collate函数，过滤掉None值（全NoData的样本）
+    """
+    # 过滤掉None值
+    batch = [item for item in batch if item is not None]
+    
+    if len(batch) == 0:
+        return None
+    
+    # 使用默认的collate函数
+    return torch.utils.data.default_collate(batch)
+
+
 def create_dataloaders(
     base_dir: str,
     batch_size: int = 4,
@@ -415,7 +465,8 @@ def create_dataloaders(
         shuffle=True,
         num_workers=num_workers,
         pin_memory=True,
-        drop_last=True
+        drop_last=True,
+        collate_fn=_collate_fn_filter_none
     )
     
     test_loader = DataLoader(
@@ -424,7 +475,8 @@ def create_dataloaders(
         shuffle=False,
         num_workers=num_workers,
         pin_memory=True,
-        drop_last=False
+        drop_last=False,
+        collate_fn=_collate_fn_filter_none
     )
     
     return train_loader, test_loader

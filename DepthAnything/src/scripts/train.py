@@ -9,6 +9,7 @@ import os
 import argparse
 import torch.optim as optim
 
+import torch
 
 # 导入新的包 - 注意：实际使用时需要确保这些模块存在
 from DepthAnything.src.models import create_dam_model, create_super_resolution_system, CombinedLoss
@@ -37,7 +38,7 @@ def train_sr_model(
         mapper_base_channels=32,
         mapper_scale_factor=30,
         use_instance_guidance=True,
-        use_adaptive_fusion=True,
+        use_adaptive_fusion=False,
 
         # 训练参数
         num_epochs=20,
@@ -57,6 +58,7 @@ def train_sr_model(
         ssim_weight=0.0,
         multiscale_weight=0.0,
         consistency_weight=0.0,
+        dominance_weight=0.3,  # 新增：多尺度主导权损失权重
 
         # 其他参数
         checkpoints_dir='./checkpoints',
@@ -78,6 +80,8 @@ def train_sr_model(
         use_amp=False,  # 启用混合精度训练
         clear_cache_freq=10,  # 每10个batch清理一次显存
         amp_mode='conservative',  # AMP模式：'conservative'更稳定，'aggressive'更快
+        use_cached_dam_encoder=True,
+        dam_batch_size=1,
 ):
     """
     主训练函数（改进版，支持分阶段训练）
@@ -99,27 +103,6 @@ def train_sr_model(
     # 设置缓存目录
     if cache_dir is None:
         cache_dir = os.path.join(data_dir, 'data_cache')
-
-    # 创建数据加载器
-    print("\n创建数据加载器...")
-    if use_cache:
-        train_loader, val_loader = create_dataloaders_with_cache(
-            base_dir=data_dir,
-            batch_size=batch_size,
-            num_workers=num_workers,
-            seed=seed,
-            cache_dir=cache_dir,
-            target_size=target_size,
-            force_rebuild_cache=force_rebuild_cache
-        )
-    else:
-        train_loader, val_loader = create_dataloaders(
-            base_dir=data_dir,
-            batch_size=batch_size,
-            num_workers=num_workers,
-            seed=seed,
-            target_size=target_size
-        )
 
     # 自动查找DAM预训练权重
     if dam_pretrained_path is None:
@@ -151,6 +134,43 @@ def train_sr_model(
         device=device
     )
 
+
+    # 创建数据加载器
+    print("\n创建数据加载器...")
+    if use_cache:
+        train_loader, val_loader = create_dataloaders_with_cache(
+            base_dir=data_dir,
+            batch_size=batch_size,
+            num_workers=num_workers,
+            seed=seed,
+            cache_dir=cache_dir,
+            target_size=target_size,
+            force_rebuild_cache=force_rebuild_cache,
+            cache_dam_encoder=use_cached_dam_encoder,
+            dam_model=dam_model,
+            dam_batch_size=dam_batch_size,
+        )
+    else:
+        train_loader, val_loader = create_dataloaders(
+            base_dir=data_dir,
+            batch_size=batch_size,
+            num_workers=num_workers,
+            seed=seed,
+            target_size=target_size
+        )
+
+    if use_cached_dam_encoder:
+        print("删除DAM Encoder前的显存占用：")
+        print(f"当前显存占用: {torch.cuda.memory_allocated() / 1024 ** 2:.2f} MB")
+        print(f"最大显存占用: {torch.cuda.max_memory_allocated() / 1024 ** 2:.2f} MB")
+
+        del dam_model.pretrained  # 删除Encoder
+        torch.cuda.empty_cache()
+
+        print("删除DAM Encoder后的显存占用：")
+        print(f"当前显存占用: {torch.cuda.memory_allocated() / 1024 ** 2:.2f} MB")
+        print(f"最大显存占用: {torch.cuda.max_memory_allocated() / 1024 ** 2:.2f} MB")
+
     # 创建超分辨率系统
     print("\n创建超分辨率系统...")
     model = create_super_resolution_system(
@@ -162,7 +182,7 @@ def train_sr_model(
         use_instance_guidance=use_instance_guidance,
         use_adaptive_fusion=use_adaptive_fusion,
         device=device,
-
+        use_cached_dam_encoder=use_cached_dam_encoder,
     )
 
     print(f"实例引导: {'启用' if use_instance_guidance else '禁用'}")
@@ -200,6 +220,8 @@ def train_sr_model(
         ssim_weight=ssim_weight,
         multiscale_weight=multiscale_weight,
         consistency_weight=consistency_weight,
+        dominance_weight=dominance_weight,
+        scale_factor=mapper_scale_factor,
         training_stage='joint',
     )
 
@@ -231,7 +253,8 @@ def train_sr_model(
         use_amp=use_amp,
         clear_cache_freq=clear_cache_freq,
         initial_lr=lr,  # 传递初始学习率用于阶段感知调度
-        amp_mode=amp_mode
+        amp_mode=amp_mode,
+        use_cached_dam_encoder=use_cached_dam_encoder
     )
 
     # 开始训练
@@ -272,7 +295,7 @@ if __name__ == "__main__":
                         help='下采样倍率')
     parser.add_argument('--use_instance_guidance', action='store_true', default=True)
     parser.add_argument('--no_instance_guidance', action='store_false', dest='use_instance_guidance')
-    parser.add_argument('--use_adaptive_fusion', action='store_true', default=True)
+    parser.add_argument('--use_adaptive_fusion', action='store_true', default=False)
     parser.add_argument('--no_adaptive_fusion', action='store_false', dest='use_adaptive_fusion')
 
     # 训练参数

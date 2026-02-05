@@ -297,7 +297,9 @@ class CombinedLoss(nn.Module):
             ssim_weight=0.0,
             multiscale_weight=0.0,
             consistency_weight=0.0,
+            dominance_weight=0.0,  # 新增：多尺度主导权损失
             scales=[1, 2, 4],
+            scale_factor=30,  # 新增：下采样倍率，用于主导权损失
             training_stage='joint'  # 'pretrain_dam', 'joint', 'finetune'
     ):
         super().__init__()
@@ -311,11 +313,16 @@ class CombinedLoss(nn.Module):
         self.ssim_weight = ssim_weight
         self.multiscale_weight = multiscale_weight
         self.consistency_weight = consistency_weight
+        self.dominance_weight = dominance_weight
         self.training_stage = training_stage
 
         self.rmse_loss = RMSELoss()
         self.l1_loss = nn.L1Loss()
         self.dam_enhanced_loss = DAMEnhancedLoss()
+        
+        # 多尺度主导权损失
+        if dominance_weight > 0:
+            self.dominance_loss = MultiScaleDominanceLoss(scale_factor=scale_factor)
         self.multiscale_loss = MultiScaleLoss(scales=scales) if multiscale_weight > 0 else None
         self.consistency_loss = ConsistencyLoss() if consistency_weight > 0 else None
 
@@ -331,7 +338,8 @@ class CombinedLoss(nn.Module):
             dam_enhanced_depth=None,
             instance_biases=None,
             prototypes=None,
-            mask=None
+            mask=None,
+            dominance_map=None,  # 新增：主导权图
     ):
         """
         计算组合损失
@@ -345,6 +353,7 @@ class CombinedLoss(nn.Module):
             instance_biases: 实例偏置值 (B, num_instances)，可选
             prototypes: 原型向量 (num_prototypes, embedding_dim)，可选
             mask: 掩码 (B, 1, H', W')，用于consistency loss，可选
+            dominance_map: 主导权图 (B, 1, H, W)，可选
 
         Returns:
             total_loss: 总损失
@@ -409,6 +418,17 @@ class CombinedLoss(nn.Module):
             total_loss += self.prototype_diversity_weight * prototype_div_loss
         loss_dict['prototype_div'] = prototype_div_loss.item()
 
+        # 多尺度主导权损失
+        dominance_loss_val = torch.tensor(0.0, device=hrdem.device)
+        if self.dominance_weight > 0 and dominance_map is not None and hasattr(self, 'dominance_loss'):
+            _, dom_loss_dict = self.dominance_loss(hrdem, usgs_dem, dominance_map, copernicus_dem)
+            dominance_loss_val = torch.tensor(dom_loss_dict['total'], device=hrdem.device)
+            total_loss += self.dominance_weight * dominance_loss_val
+            loss_dict['dominance_global'] = dom_loss_dict['global']
+            loss_dict['dominance_detail'] = dom_loss_dict['detail']
+            loss_dict['dominance_alpha'] = dom_loss_dict['dominance']
+        loss_dict['dominance'] = dominance_loss_val.item()
+
         loss_dict['total'] = total_loss.item()
 
         return total_loss, loss_dict
@@ -440,3 +460,107 @@ class CombinedLoss(nn.Module):
             self.hrdem_weight = 1.0
             self.mapping_weight = 0.3
             print("切换到阶段3：SR微调")
+
+
+class MultiScaleDominanceLoss(nn.Module):
+    """
+    多尺度主导权损失
+    
+    目标：
+    - 最大尺度（整幅图）：HRDEM必须与LR DEM统计对齐
+    - 细节尺度（像素级）：允许自由发挥，只约束梯度
+    - 中间尺度：监督alpha学习，使其与真实细节丰富度一致
+    
+    输入：
+    - hrdem: 预测的高分辨率DEM
+    - usgs: USGS真值
+    - alpha: 主导权图（0=听LR DEM, 1=听Relative Map）
+    - copernicus: LR DEM（用于计算真实细节对比）
+    - scale_factor: 下采样倍率（定义"中间尺度"）
+    """
+    
+    def __init__(self, scale_factor=30, global_weight=1.0, detail_weight=0.5, dominance_weight=0.3):
+        super().__init__()
+        self.scale_factor = scale_factor
+        self.global_weight = global_weight
+        self.detail_weight = detail_weight
+        self.dominance_weight = dominance_weight
+        
+        # 拉普拉斯算子（提取高频细节）
+        self.register_buffer('laplace_kernel', torch.tensor(
+            [[0, 1, 0],
+             [1, -4, 1],
+             [0, 1, 0]], dtype=torch.float32).view(1, 1, 3, 3))
+    
+    def forward(self, hrdem, usgs, alpha, copernicus):
+        """
+        Args:
+            hrdem: (B, 1, H, W)
+            usgs: (B, 1, H, W)
+            alpha: (B, 1, H, W) - 主导权图
+            copernicus: (B, 1, H, W) - LR DEM
+            
+        Returns:
+            total_loss: 总损失
+            loss_dict: 各分项损失
+        """
+        loss_dict = {}
+        
+        # 1. 全局损失：整幅图统计量对齐（最大尺度）
+        hrdem_mean = hrdem.mean(dim=(2, 3))
+        usgs_mean = usgs.mean(dim=(2, 3))
+        global_loss = F.mse_loss(hrdem_mean, usgs_mean)
+        loss_dict['global'] = global_loss.item()
+        
+        # 2. 细节损失：高频成分（最小尺度）
+        # 使用拉普拉斯算子提取细节
+        hrdem_detail = F.conv2d(hrdem, self.laplace_kernel.to(hrdem.device), padding=1)
+        usgs_detail = F.conv2d(usgs, self.laplace_kernel.to(usgs.device), padding=1)
+        detail_loss = F.l1_loss(hrdem_detail, usgs_detail)
+        loss_dict['detail'] = detail_loss.item()
+        
+        # 3. 主导权监督损失（中间尺度）
+        # alpha应该与"USGS比Copernicus多多少细节"正相关
+        
+        # 3.1 计算中间尺度的平滑版本
+        B, _, H, W = usgs.shape
+        regional_h = max(1, H // self.scale_factor)
+        regional_w = max(1, W // self.scale_factor)
+        
+        # USGS和Copernicus的中间尺度平滑
+        usgs_pooled = F.adaptive_avg_pool2d(usgs, (regional_h, regional_w))
+        cop_pooled = F.adaptive_avg_pool2d(copernicus, (regional_h, regional_w))
+        
+        # 上采样回原始尺寸
+        usgs_smooth = F.interpolate(usgs_pooled, (H, W), mode='nearest')
+        cop_smooth = F.interpolate(cop_pooled, (H, W), mode='nearest')
+        
+        # 3.2 计算每个像素的"细节丰富度"
+        # USGS细节 = |原始 - 平滑|
+        usgs_detail_map = torch.abs(usgs - usgs_smooth)
+        cop_detail_map = torch.abs(copernicus - cop_smooth)
+        
+        # 3.3 USGS相对于Copernicus的细节优势
+        detail_advantage = (usgs_detail_map - cop_detail_map).clamp(min=0)
+        
+        # 3.4 在中间尺度上计算平均细节优势
+        detail_adv_pooled = F.adaptive_avg_pool2d(detail_advantage, (regional_h, regional_w))
+        
+        # 3.5 alpha也在同一尺度上计算
+        alpha_pooled = F.adaptive_avg_pool2d(alpha, (regional_h, regional_w))
+        
+        # 3.6 目标：如果细节优势大，alpha应该大（听Relative Map的）
+        # 归一化细节优势到[0,1]
+        detail_max = detail_adv_pooled.max() + 1e-6
+        alpha_target = torch.sigmoid(detail_adv_pooled * 10.0 / detail_max)
+        
+        dominance_loss = F.mse_loss(alpha_pooled, alpha_target)
+        loss_dict['dominance'] = dominance_loss.item()
+        
+        # 4. 组合损失
+        total_loss = (self.global_weight * global_loss + 
+                     self.detail_weight * detail_loss + 
+                     self.dominance_weight * dominance_loss)
+        loss_dict['total'] = total_loss.item()
+        
+        return total_loss, loss_dict
