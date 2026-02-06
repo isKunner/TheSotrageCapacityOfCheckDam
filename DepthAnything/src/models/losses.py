@@ -65,44 +65,70 @@ class GradientLoss(nn.Module):
         return grad_loss
 
 
+# 【修改】新增：拉普拉斯高频损失
+class LaplacianHFLoss(nn.Module):
+    """
+    拉普拉斯高频损失（保留地形结构线）
+
+    使用拉普拉斯算子提取二阶梯度（曲率），强制DAM保留
+    与USGS DEM一致的地形结构线（山脊、山谷、陡坎）
+    """
+
+    def __init__(self):
+        super().__init__()
+        # 拉普拉斯核（二阶梯度）
+        self.register_buffer('laplacian_kernel', torch.tensor(
+            [[0, 1, 0],
+             [1, -4, 1],
+             [0, 1, 0]], dtype=torch.float32).view(1, 1, 3, 3))
+
+    def forward(self, pred, target):
+        # 提取高频层（曲率）
+        pred_hf = F.conv2d(pred, self.laplacian_kernel.to(pred.device), padding=1)
+        target_hf = F.conv2d(target, self.laplacian_kernel.to(target.device), padding=1)
+
+        # L1损失强制高频系数匹配
+        return torch.mean(torch.abs(pred_hf - target_hf))
+
+
 class SSIMLoss(nn.Module):
     """
     SSIM损失（结构相似性）
-    
+
     计算预测与目标之间的结构相似性指数，值越小表示越不相似
     """
-    
+
     def __init__(self, window_size=11):
         super().__init__()
         self.window_size = window_size
-        
+
     def forward(self, pred, target):
         # 使用高斯窗口
         sigma = 1.5
-        gauss = torch.Tensor([np.exp(-(x - self.window_size//2)**2/float(2*sigma**2)) 
+        gauss = torch.Tensor([np.exp(-(x - self.window_size//2)**2/float(2*sigma**2))
                               for x in range(self.window_size)])
         gauss = gauss / gauss.sum()
-        
+
         window = gauss.unsqueeze(0).unsqueeze(0) * gauss.unsqueeze(0).unsqueeze(2)
         window = window.expand(1, 1, self.window_size, self.window_size).to(pred.device)
-        
+
         mu1 = F.conv2d(pred, window, padding=self.window_size//2)
         mu2 = F.conv2d(target, window, padding=self.window_size//2)
-        
+
         mu1_sq = mu1 ** 2
         mu2_sq = mu2 ** 2
         mu1_mu2 = mu1 * mu2
-        
+
         sigma1_sq = F.conv2d(pred ** 2, window, padding=self.window_size//2) - mu1_sq
         sigma2_sq = F.conv2d(target ** 2, window, padding=self.window_size//2) - mu2_sq
         sigma12 = F.conv2d(pred * target, window, padding=self.window_size//2) - mu1_mu2
-        
+
         C1 = 0.01 ** 2
         C2 = 0.03 ** 2
-        
+
         ssim_map = ((2 * mu1_mu2 + C1) * (2 * sigma12 + C2)) / \
                    ((mu1_sq + mu2_sq + C1) * (sigma1_sq + sigma2_sq + C2))
-        
+
         return 1 - ssim_map.mean()
 
 
@@ -141,7 +167,7 @@ class DAMEnhancedLoss(nn.Module):
                                    torch.ones_like(target_max),
                                    target_max - target_min)
         target_normalized = (target_depth - target_min) / target_range
-        
+
         # 检查数值有效性
         if torch.isnan(target_normalized).any() or torch.isinf(target_normalized).any():
             print("警告: DAMEnhancedLoss中target_normalized包含NaN/Inf")
@@ -279,6 +305,8 @@ class CombinedLoss(nn.Module):
     6. 实例偏置正则化损失
     7. 原型多样性损失（可选）
     8. 多尺度损失（可选）
+    9. 【修改】拉普拉斯高频损失（保留地形结构）
+    10. 【修改】激活熵正则（鼓励软分配）
 
     分阶段训练策略：
     - 阶段1（pretrain_dam）：主要优化dam_enhanced_loss
@@ -297,10 +325,13 @@ class CombinedLoss(nn.Module):
             ssim_weight=0.0,
             multiscale_weight=0.0,
             consistency_weight=0.0,
-            dominance_weight=0.0,  # 新增：多尺度主导权损失
+            dominance_weight=0.0,
             scales=[1, 2, 4],
-            scale_factor=30,  # 新增：下采样倍率，用于主导权损失
-            training_stage='joint'  # 'pretrain_dam', 'joint', 'finetune'
+            scale_factor=30,
+            training_stage='joint',
+            # 【修改】新增高频损失和熵正则权重
+            laplacian_weight=0.5,  # 拉普拉斯高频损失权重
+            entropy_weight=0.01,   # 激活熵正则权重（负值，最小化负熵=最大化熵）
     ):
         super().__init__()
 
@@ -316,10 +347,20 @@ class CombinedLoss(nn.Module):
         self.dominance_weight = dominance_weight
         self.training_stage = training_stage
 
+        # 【修改】保存高频损失权重
+        self.laplacian_weight = laplacian_weight
+        self.entropy_weight = entropy_weight
+
         self.rmse_loss = RMSELoss()
         self.l1_loss = nn.L1Loss()
         self.dam_enhanced_loss = DAMEnhancedLoss()
-        
+
+        # 【修改】初始化拉普拉斯高频损失
+        if laplacian_weight > 0:
+            self.laplacian_loss = LaplacianHFLoss()
+        else:
+            self.laplacian_loss = None
+
         # 多尺度主导权损失
         if dominance_weight > 0:
             self.dominance_loss = MultiScaleDominanceLoss(scale_factor=scale_factor)
@@ -339,7 +380,9 @@ class CombinedLoss(nn.Module):
             instance_biases=None,
             prototypes=None,
             mask=None,
-            dominance_map=None,  # 新增：主导权图
+            dominance_map=None,
+            # 【修改】新增参数
+            activation_entropy=None,  # DAM返回的激活熵
     ):
         """
         计算组合损失
@@ -350,10 +393,11 @@ class CombinedLoss(nn.Module):
             mapped_lrdem: 映射后的低分辨率DEM (B, 1, H', W')
             copernicus_dem: Copernicus DEM (B, 1, H', W')
             dam_enhanced_depth: DAM增强深度图 (B, H, W) 或 (B, 1, H, W)，可选
-            instance_biases: 实例偏置值 (B, num_instances)，可选
+            instance_biases: 实例偏置值（现在是增益值） (B, num_instances)，可选
             prototypes: 原型向量 (num_prototypes, embedding_dim)，可选
             mask: 掩码 (B, 1, H', W')，用于consistency loss，可选
             dominance_map: 主导权图 (B, 1, H, W)，可选
+            activation_entropy: 原型激活熵，scalar，可选
 
         Returns:
             total_loss: 总损失
@@ -368,6 +412,12 @@ class CombinedLoss(nn.Module):
             total_loss += self.hrdem_weight * hrdem_loss
             loss_dict['hrdem'] = hrdem_loss.item()
 
+            # 【修改】拉普拉斯高频损失（强制保留地形结构线）
+            if self.laplacian_weight > 0 and self.laplacian_loss is not None:
+                lap_loss = self.laplacian_loss(hrdem, usgs_dem)
+                total_loss += self.laplacian_weight * lap_loss
+                loss_dict['laplacian'] = lap_loss.item()
+
         # 映射损失
         if self.mapping_weight > 0:
             mapping_loss = self.rmse_loss(mapped_lrdem, copernicus_dem)
@@ -375,10 +425,25 @@ class CombinedLoss(nn.Module):
             loss_dict['mapping'] = mapping_loss.item()
 
         # DAM Enhanced Depth损失（阶段1使用）
+        if self.grad_weight > 0 and self.grad_loss is not None:
+            dam_grad_loss = self.grad_loss(
+                dam_enhanced_depth.unsqueeze(1) if dam_enhanced_depth.dim() == 3 else dam_enhanced_depth,
+                usgs_dem
+            )
+            total_loss += self.grad_weight * dam_grad_loss * 0.5  # 权重可略低于SR阶段
+            loss_dict['dam_grad'] = dam_grad_loss.item()
+
         if self.dam_enhanced_weight > 0 and dam_enhanced_depth is not None:
             dam_loss = self.dam_enhanced_loss(dam_enhanced_depth, usgs_dem)
             total_loss += self.dam_enhanced_weight * dam_loss
             loss_dict['dam_enhanced'] = dam_loss.item()
+
+            # 【修改】DAM阶段也加入高频约束
+            if self.laplacian_weight > 0 and self.laplacian_loss is not None:
+                dam_lap_loss = self.laplacian_loss(dam_enhanced_depth.unsqueeze(1) if dam_enhanced_depth.dim()==3 else dam_enhanced_depth,
+                                                   usgs_dem)
+                total_loss += self.laplacian_weight * dam_lap_loss * 0.5  # DAM阶段权重可略低
+                loss_dict['dam_laplacian'] = dam_lap_loss.item()
 
         # 多尺度损失
         if self.multiscale_weight > 0 and self.multiscale_loss is not None:
@@ -392,7 +457,7 @@ class CombinedLoss(nn.Module):
             total_loss += self.consistency_weight * cons_loss
             loss_dict['consistency'] = cons_loss.item()
 
-        # 梯度一致性损失
+        # 梯度一致性损失（Sobel边缘）
         if self.grad_weight > 0 and self.grad_loss is not None:
             grad_loss = self.grad_loss(hrdem, usgs_dem)
             total_loss += self.grad_weight * grad_loss
@@ -404,10 +469,11 @@ class CombinedLoss(nn.Module):
             total_loss += self.ssim_weight * ssim_loss_val
             loss_dict['ssim'] = ssim_loss_val.item()
 
-        # 实例偏置正则化损失
+        # 实例偏置正则化损失（现在是增益值，正则化鼓励接近1.0）
         instance_reg_loss = torch.tensor(0.0, device=hrdem.device)
         if instance_biases is not None and self.instance_weight > 0:
-            instance_reg_loss = torch.mean(instance_biases ** 2)
+            # 【修改】乘性门控下，偏置接近1.0表示"不调整"，所以正则化 (bias - 1)^2
+            instance_reg_loss = torch.mean((instance_biases - 1.0) ** 2)
             total_loss += self.instance_weight * instance_reg_loss
         loss_dict['instance_reg'] = instance_reg_loss.item()
 
@@ -429,6 +495,13 @@ class CombinedLoss(nn.Module):
             loss_dict['dominance_alpha'] = dom_loss_dict['dominance']
         loss_dict['dominance'] = dominance_loss_val.item()
 
+        # 【修改】激活熵正则（鼓励软分配，减少块状硬边界）
+        if activation_entropy is not None and self.entropy_weight > 0:
+            # 最大化熵 = 最小化负熵
+            entropy_loss = -activation_entropy
+            total_loss += self.entropy_weight * entropy_loss
+            loss_dict['entropy'] = entropy_loss.item()
+
         loss_dict['total'] = total_loss.item()
 
         return total_loss, loss_dict
@@ -443,34 +516,38 @@ class CombinedLoss(nn.Module):
         self.training_stage = stage
 
         if stage == 'pretrain_dam':
-            # 阶段1：主要优化DAM
+            # 阶段1：主要优化DAM，加入高频约束
             self.dam_enhanced_weight = 1.0
             self.hrdem_weight = 0.1
             self.mapping_weight = 0.0
-            print("切换到阶段1：DAM预训练")
+            self.laplacian_weight = 1.0  # 【修改】DAM预训练时加强高频约束
+            print("切换到阶段1：DAM预训练（乘性门控+高频保留）")
         elif stage == 'joint':
             # 阶段2：联合训练
             self.dam_enhanced_weight = 0.3
             self.hrdem_weight = 1.0
             self.mapping_weight = 0.5
+            self.laplacian_weight = 0.5
             print("切换到阶段2：联合训练")
         elif stage == 'finetune':
             # 阶段3：微调SR
             self.dam_enhanced_weight = 0.0
             self.hrdem_weight = 1.0
             self.mapping_weight = 0.3
+            self.laplacian_weight = 0.3
+            self.grad_weight = 0.2  # 【修改】SR微调时启用Sobel边缘约束
             print("切换到阶段3：SR微调")
 
 
 class MultiScaleDominanceLoss(nn.Module):
     """
     多尺度主导权损失
-    
+
     目标：
     - 最大尺度（整幅图）：HRDEM必须与LR DEM统计对齐
     - 细节尺度（像素级）：允许自由发挥，只约束梯度
     - 中间尺度：监督alpha学习，使其与真实细节丰富度一致
-    
+
     输入：
     - hrdem: 预测的高分辨率DEM
     - usgs: USGS真值
@@ -478,20 +555,20 @@ class MultiScaleDominanceLoss(nn.Module):
     - copernicus: LR DEM（用于计算真实细节对比）
     - scale_factor: 下采样倍率（定义"中间尺度"）
     """
-    
+
     def __init__(self, scale_factor=30, global_weight=1.0, detail_weight=0.5, dominance_weight=0.3):
         super().__init__()
         self.scale_factor = scale_factor
         self.global_weight = global_weight
         self.detail_weight = detail_weight
         self.dominance_weight = dominance_weight
-        
+
         # 拉普拉斯算子（提取高频细节）
         self.register_buffer('laplace_kernel', torch.tensor(
             [[0, 1, 0],
              [1, -4, 1],
              [0, 1, 0]], dtype=torch.float32).view(1, 1, 3, 3))
-    
+
     def forward(self, hrdem, usgs, alpha, copernicus):
         """
         Args:
@@ -499,23 +576,23 @@ class MultiScaleDominanceLoss(nn.Module):
             usgs: (B, 1, H, W)
             alpha: (B, 1, H, W) - 主导权图
             copernicus: (B, 1, H, W) - LR DEM
-            
+
         Returns:
             total_loss: 总损失
             loss_dict: 各分项损失
         """
         loss_dict = {}
-        
+
         # 1. 全局损失：整幅图统计量对齐（最大尺度）
         hrdem_mean = hrdem.mean(dim=(2, 3))
         usgs_mean = usgs.mean(dim=(2, 3))
         global_loss = F.mse_loss(hrdem_mean, usgs_mean)
         loss_dict['global'] = global_loss.item()
-        
+
         # 2. 细节损失：高频成分（最小尺度）
         # 使用拉普拉斯算子提取细节
-        hrdem_detail = F.conv2d(hrdem, self.laplace_kernel.to(hrdem.device), padding=1)
-        usgs_detail = F.conv2d(usgs, self.laplace_kernel.to(usgs.device), padding=1)
+        hrdem_detail = F.conv2d(hrdem, self.laplacian_kernel.to(hrdem.device), padding=1)
+        usgs_detail = F.conv2d(usgs, self.laplacian_kernel.to(usgs.device), padding=1)
         detail_loss = F.l1_loss(hrdem_detail, usgs_detail)
         loss_dict['detail'] = detail_loss.item()
         
