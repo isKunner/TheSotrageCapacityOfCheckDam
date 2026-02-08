@@ -2,6 +2,7 @@
 DepthAnything/remote_img_results/
 DepthAnything/logs/
 DepthAnything/Test/
+DepthAnything/Train/
 DepthAnything/checkpoints/
 DepthAnything_v1/
 Depth-Anything-3/

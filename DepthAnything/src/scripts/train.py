@@ -6,16 +6,20 @@
 # @Describe: 改进的训练脚本，支持分阶段训练
 
 import os
+import sys
 import argparse
 import torch.optim as optim
 
 import torch
 
-# 导入新的包 - 注意：实际使用时需要确保这些模块存在
-from DepthAnything.src.models import create_dam_model, create_super_resolution_system, CombinedLoss
-from DepthAnything.src.data import create_dataloaders_with_cache, create_dataloaders
-from DepthAnything.src.training import MultiStageTrainer, EarlyStopping
-from DepthAnything.src.utils import set_seed, count_parameters, get_device, clear_cuda_cache, print_gpu_memory_info
+# 添加项目根目录到路径
+project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, project_root)
+
+from ..models import create_dam_model, create_super_resolution_system, CombinedLoss
+from ..data import create_dataloaders_with_cache, create_dataloaders
+from ..training import MultiStageTrainer, EarlyStopping
+from ..utils import set_seed, count_parameters, get_device, clear_cuda_cache, print_gpu_memory_info
 
 
 def train_sr_model(
@@ -31,8 +35,8 @@ def train_sr_model(
         # 模型参数
         dam_encoder='vits',
         dam_pretrained_path=None,
-        num_prototypes=128,
-        embedding_dim=64,
+        num_prototypes=16,
+        embedding_dim=32,
         sr_channels=64,
         sr_residual_blocks=8,
         mapper_base_channels=32,
@@ -48,17 +52,12 @@ def train_sr_model(
         scheduler_gamma=0.5,
         grad_clip=1.0,
 
-        # 损失权重
-        hrdem_weight=1.0,
-        mapping_weight=0.5,
-        dam_enhanced_weight=0.3,
-        instance_weight=0.05,
-        prototype_diversity_weight=0.01,
-        grad_weight=0.0,
-        ssim_weight=0.0,
-        multiscale_weight=0.0,
-        consistency_weight=0.0,
-        dominance_weight=0.3,  # 新增：多尺度主导权损失权重
+        # 损失权重（精简版，适配小batch）
+        hrdem_weight=1.0,           # RMSE核心损失
+        mapping_weight=1.0,         # 映射损失
+        dam_enhanced_weight=0.5,    # DAM高频细节损失
+        grad_weight=0.2,            # 梯度损失（Sobel）
+        laplacian_weight=0.3,       # 拉普拉斯高频损失
 
         # 其他参数
         checkpoints_dir='./checkpoints',
@@ -214,14 +213,8 @@ def train_sr_model(
         hrdem_weight=hrdem_weight,
         mapping_weight=mapping_weight,
         dam_enhanced_weight=dam_enhanced_weight,
-        instance_weight=instance_weight,
-        prototype_diversity_weight=prototype_diversity_weight,
         grad_weight=grad_weight,
-        ssim_weight=ssim_weight,
-        multiscale_weight=multiscale_weight,
-        consistency_weight=consistency_weight,
-        dominance_weight=dominance_weight,
-        scale_factor=mapper_scale_factor,
+        laplacian_weight=laplacian_weight,
         training_stage='joint',
     )
 
@@ -284,9 +277,9 @@ if __name__ == "__main__":
     parser.add_argument('--dam_encoder', type=str, default='vits',
                         choices=['vits', 'vitb', 'vitl', 'vitg'])
     parser.add_argument('--dam_pretrained_path', type=str, default=None)
-    parser.add_argument('--num_prototypes', type=int, default=128,
-                        help='原型数量（替代num_instances）')
-    parser.add_argument('--embedding_dim', type=int, default=64,
+    parser.add_argument('--num_prototypes', type=int, default=16,
+                        help='原型数量')
+    parser.add_argument('--embedding_dim', type=int, default=32,
                         help='嵌入维度')
     parser.add_argument('--sr_channels', type=int, default=64)
     parser.add_argument('--sr_residual_blocks', type=int, default=8)
@@ -315,16 +308,17 @@ if __name__ == "__main__":
     parser.add_argument('--joint_epochs', type=int, default=None)
     parser.add_argument('--finetune_epochs', type=int, default=None)
 
-    # 损失权重
-    parser.add_argument('--hrdem_weight', type=float, default=1.0)
-    parser.add_argument('--mapping_weight', type=float, default=0.5)
-    parser.add_argument('--dam_enhanced_weight', type=float, default=0.3)
-    parser.add_argument('--instance_weight', type=float, default=0.05)
-    parser.add_argument('--prototype_diversity_weight', type=float, default=0.01)
-    parser.add_argument('--grad_weight', type=float, default=0.0)
-    parser.add_argument('--ssim_weight', type=float, default=0.0)
-    parser.add_argument('--multiscale_weight', type=float, default=0.0)
-    parser.add_argument('--consistency_weight', type=float, default=0.0)
+    # 损失权重（精简版，适配小batch）
+    parser.add_argument('--hrdem_weight', type=float, default=1.0,
+                        help='HRDEM RMSE损失权重（核心）')
+    parser.add_argument('--mapping_weight', type=float, default=1.0,
+                        help='映射损失权重')
+    parser.add_argument('--dam_enhanced_weight', type=float, default=0.5,
+                        help='DAM高频细节损失权重')
+    parser.add_argument('--grad_weight', type=float, default=0.2,
+                        help='梯度损失(Sobel)权重')
+    parser.add_argument('--laplacian_weight', type=float, default=0.3,
+                        help='拉普拉斯高频损失权重')
 
     # 早停参数
     parser.add_argument('--use_early_stopping', action='store_true',

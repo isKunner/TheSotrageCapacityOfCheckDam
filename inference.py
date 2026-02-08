@@ -13,10 +13,10 @@ from DepthAnything.src import run_dem_super_resolution
 run_dem_super_resolution(
     test_dir=osp.join(dam_project_path, "Test"),
     copernicus_folder="Copernicus_1.0m_1024pixel",
-    google_folder="google_1.0m_1024pixel",
-    checkpoint=osp.join(dam_project_path, "checkpoints", "20260205_zscore", "best_checkpoint.pth"),
-    output_dir=osp.join(dam_project_path, "20260205_zscore"),
-    encoder="vitg",
-    batch_size=4,
-
+    google_folder="WMG_1.0m_1024pixel",
+    checkpoint=osp.join(dam_project_path, "checkpoints", "depth_anything_v2_vits.pth"),
+    output_dir=osp.join(dam_project_path, "20260205_test"),
+    encoder="vits",
+    batch_size=1,
+    device='cpu'
 )

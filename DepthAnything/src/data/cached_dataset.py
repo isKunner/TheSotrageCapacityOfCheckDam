@@ -504,6 +504,8 @@ class CachedDEMDataset(Dataset):
         
         # Google归一化
         if self.normalize:
+            if google_data.max() > 1:
+                google_data = google_data / 255.0
             for i in range(google_data.shape[0]):
                 google_data[i] = (google_data[i] - self.image_mean[i]) / self.image_std[i]
         

@@ -364,9 +364,6 @@ class MultiStageTrainer:
                     mapped_lrdem = output['mapped_lrdem']
                     dam_enhanced = output['dam_output'].get('enhanced_depth', None)
                     instance_biases = output['dam_output'].get('prototype_biases', None)
-                    prototypes = self.model.dam_model.instance_head.prototypes
-
-                    # 获取主导权图（如果存在）
                     dominance_map = output.get('dominance_map', None)
                     
                     # 计算损失
@@ -377,7 +374,6 @@ class MultiStageTrainer:
                         copernicus_dem=F.adaptive_avg_pool2d(copernicus, mapped_lrdem.shape[-2:]),
                         dam_enhanced_depth=dam_enhanced,
                         instance_biases=instance_biases,
-                        prototypes=prototypes,
                         dominance_map=dominance_map,
                     )
 
@@ -423,8 +419,8 @@ class MultiStageTrainer:
                 mapped_lrdem = output['mapped_lrdem']
                 dam_enhanced = output['dam_output'].get('enhanced_depth', None)
                 instance_biases = output['dam_output'].get('prototype_biases', None)
-                prototypes = self.model.dam_model.instance_head.prototypes
                 dominance_map = output.get('dominance_map', None)
+                gaussian_params = output['dam_output'].get('gaussian_sigma', None)
 
                 # 计算损失
                 loss, loss_dict = self.criterion(
@@ -434,7 +430,7 @@ class MultiStageTrainer:
                     copernicus_dem=F.adaptive_avg_pool2d(copernicus, mapped_lrdem.shape[-2:]),
                     dam_enhanced_depth=dam_enhanced,
                     instance_biases=instance_biases,
-                    prototypes=prototypes,
+                    gaussian_params=gaussian_params,
                     dominance_map=dominance_map,
                 )
 
@@ -512,9 +508,7 @@ class MultiStageTrainer:
                     mapped_lrdem = output['mapped_lrdem']
                     dam_enhanced = output['dam_output'].get('enhanced_depth', None)
                     instance_biases = output['dam_output'].get('prototype_biases', None)
-                    prototypes = self.model.dam_model.instance_head.prototypes
-
-                    # 获取主导权图
+                    gaussian_params = output['dam_output'].get('gaussian_sigma', None)
                     dominance_map = output.get('dominance_map', None)
                     
                     # 计算损失
@@ -525,8 +519,8 @@ class MultiStageTrainer:
                         copernicus_dem=F.adaptive_avg_pool2d(copernicus, mapped_lrdem.shape[-2:]),
                         dam_enhanced_depth=dam_enhanced,
                         instance_biases=instance_biases,
-                        prototypes=prototypes,
                         dominance_map=dominance_map,
+                        gaussian_params=gaussian_params,
                     )
             else:
                 output = self.model(google, copernicus, dam_encoder_features=dam_encoder_features)
@@ -534,7 +528,6 @@ class MultiStageTrainer:
                 mapped_lrdem = output['mapped_lrdem']
                 dam_enhanced = output['dam_output'].get('enhanced_depth', None)
                 instance_biases = output['dam_output'].get('prototype_biases', None)
-                prototypes = self.model.dam_model.instance_head.prototypes
                 dominance_map = output.get('dominance_map', None)
 
                 # 计算损失
@@ -545,7 +538,6 @@ class MultiStageTrainer:
                     copernicus_dem=F.adaptive_avg_pool2d(copernicus, mapped_lrdem.shape[-2:]),
                     dam_enhanced_depth=dam_enhanced,
                     instance_biases=instance_biases,
-                    prototypes=prototypes,
                     dominance_map=dominance_map,
                 )
 

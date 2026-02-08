@@ -18,7 +18,7 @@ current_file_dir = os.path.dirname(os.path.abspath(__file__))
 parent_dir = os.path.dirname(current_file_dir)
 sys.path.insert(0, parent_dir)
 
-from depth_anything_v2.dpt import DepthAnythingV2
+from DepthAnything.src.models.depth_anything_v2.dpt import DepthAnythingV2
 from DEMAndRemoteSensingUtils import crop_source_to_reference, batch_modify_tifs_vectorized
 from LocalPath import ROOT_DIR
 
@@ -26,13 +26,13 @@ sys.path.insert(0, str(ROOT_DIR))
 
 # ==================== 用户配置区域 ====================
 # 输入输出配置
-INPUT_IMAGE_PATH = r'D:\研究文件\ResearchData\USA\GoogleRemoteSensing\GeoDAR_v11_dams_of_USA_group1\130.tif'
+INPUT_IMAGE_PATH = r'C:\Users\Kevin\Desktop\TheSotrageCapacityOfCheckDam\DepthAnything\Test\WMG_1.0m_1024pixel\375644_1103401_Google.tif'
 REFERENCE_DEM_PATH = r'D:\研究文件\ResearchData\USA\USGSDEM\GeoDAR_v11_dams_of_USA_group1\130.tif'
-OUTPUT_DIR = r'./remote_img_results/original/vitg/USA/GeoDAR_v11_dams_of_USA_group1'
+OUTPUT_DIR = r'./'
 
 # 模型配置
-ENCODER = 'vitg'  # 可选: 'vits', 'vitb', 'vitl', 'vitg'
-INPUT_SIZE = 1024
+ENCODER = 'vits'  # 可选: 'vits', 'vitb', 'vitl', 'vitg'
+INPUT_SIZE = 1022
 DEVICE = 'cpu'  # 可选: 'cuda', 'cpu'
 
 # 可视化配置
@@ -48,6 +48,8 @@ def read_tif_as_bgr(tif_path):
     with rasterio.open(tif_path) as src:
         # 读取所有波段 (bands, height, width)
         image = src.read()
+
+        image = image[:, 1:-1, 1:-1]
 
         # 检查波段数
         if image.shape[0] >= 3:
@@ -136,12 +138,12 @@ def main():
     output_tif_path = os.path.join(OUTPUT_DIR, output_tif_name)
 
     # 保存为GeoTIFF（保持地理参考）
-    print(f"正在保存GeoTIFF: {output_tif_path}")
-    batch_modify_tifs_vectorized(
-        tif_paths=[REFERENCE_DEM_PATH],  # 参考TIF路径（单元素列表）
-        input_matrices=depth_batch,  # (1, H, W)
-        output_paths=[output_tif_path]  # 输出路径（单元素列表）
-    )
+    # print(f"正在保存GeoTIFF: {output_tif_path}")
+    # batch_modify_tifs_vectorized(
+    #     tif_paths=[REFERENCE_DEM_PATH],  # 参考TIF路径（单元素列表）
+    #     input_matrices=depth_batch,  # (1, H, W)
+    #     output_paths=[output_tif_path]  # 输出路径（单元素列表）
+    # )
 
     # 可视化保存
     cmap = matplotlib.colormaps.get_cmap('Spectral_r')

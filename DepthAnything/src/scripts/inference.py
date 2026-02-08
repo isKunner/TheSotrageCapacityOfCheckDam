@@ -14,7 +14,7 @@ sys.path.insert(0, project_root)
 
 import argparse
 import json
-from typing import List, Dict
+from typing import List, Dict, Union
 
 import numpy as np
 import torch
@@ -29,21 +29,20 @@ from ..models import create_dam_model, create_super_resolution_system
 from ..data import collect_test_samples, DEMSuperResolutionDataset, _collate_fn_filter_none
 
 
-def load_model(checkpoint_path: str,
+def load_model(checkpoint: Union[str, List[str]],
                device='cuda',
-               # 模型参数 - 与train.py保持一致
                dam_encoder='vits',
-               num_prototypes=128,
-               embedding_dim=64,
+               num_prototypes=16,
+               embedding_dim=32,
                sr_channels=64,
                sr_residual_blocks=8,
                mapper_base_channels=32,
                mapper_scale_factor=30,
                use_instance_guidance=True,
-               use_adaptive_fusion=True,
+               use_adaptive_fusion=False,
                ):
     """从检查点加载模型"""
-    print(f"加载模型: {checkpoint_path}")
+    print(f"加载模型: {checkpoint}")
     print(f"  - DAM编码器: {dam_encoder}")
     print(f"  - 原型数量: {num_prototypes}")
     print(f"  - 嵌入维度: {embedding_dim}")
@@ -53,6 +52,12 @@ def load_model(checkpoint_path: str,
     print(f"  - Mapper下采样倍率: {mapper_scale_factor}")
     print(f"  - 实例引导: {'启用' if use_instance_guidance else '禁用'}")
     print(f"  - 自适应融合: {'启用' if use_adaptive_fusion else '禁用'}")
+
+    # 如果是字符串，转换为列表统一处理
+    if isinstance(checkpoint, str):
+        checkpoint_paths = [checkpoint]
+    else:
+        checkpoint_paths = checkpoint
 
     # 创建DAM模型
     dam_model = create_dam_model(
@@ -76,10 +81,30 @@ def load_model(checkpoint_path: str,
     )
 
     # 加载权重
-    checkpoint = torch.load(checkpoint_path, map_location=device)
-    model.load_state_dict(checkpoint['model_state_dict'], strict=False)
-    model.eval()
+    merged_state_dict = {}
 
+    for path in checkpoint_paths:
+        print(f"加载权重文件: {path}")
+        checkpoint = torch.load(path, map_location=device)
+
+        # 处理权重名称前缀（如 DAM 模型）
+        if os.path.basename(path) in [f"depth_anything_v2_vit{encoder}.pth" for encoder in ['s', 'b', 'l', 'g']]:
+            checkpoint = {'dam_model.' + k: v for k, v in checkpoint.items()}
+            merged_state_dict.update(checkpoint)
+
+        else:
+            # 获取 state_dict
+            state_dict = checkpoint.get('model_state_dict', checkpoint)
+            # 合并到总 state_dict 中
+            merged_state_dict.update(state_dict)
+
+    missing_keys, unexpected_keys = model.load_state_dict(merged_state_dict, strict=False)
+
+    print("Missing keys:", missing_keys)
+    print("Unexpected keys:", unexpected_keys)
+
+
+    model.eval()
     print(f"模型加载完成 (Epoch {checkpoint.get('epoch', 'unknown')})")
     return model
 
@@ -95,7 +120,8 @@ def save_prediction(
     output_dir: str,
     filename: str,
     save_viz: bool = True,
-    dam_dem_norm: torch.Tensor = None,
+    dam_original: torch.Tensor = None,  # DAM原始输出 (H, W)
+    dam_enhanced: torch.Tensor = None,  # DAM增强输出 (H, W)
     has_ground_truth: bool = False
 ):
     """保存预测结果(保留地理信息)"""
@@ -146,13 +172,20 @@ def save_prediction(
         dst.write(hrdem_np.astype(np.float32), 1)
 
     # 保存 DAM 原始输出（如果有）
-    if dam_dem_norm is not None:
-        dam_orig = dam_dem_norm * usgs_std + usgs_mean
-        dam_np = dam_orig.squeeze().cpu().numpy()
-
-        dam_path = os.path.join(output_dir, f"{filename}_DAM_raw.tif")
+    if dam_original is not None:
+        # dam_orig = dam_original * usgs_std + usgs_mean
+        dam_np = dam_original.squeeze().cpu().numpy()
+        dam_path = os.path.join(output_dir, f"{filename}_DAM_original.tif")
         with rasterio.open(dam_path, 'w', **out_profile) as dst:
             dst.write(dam_np.astype(np.float32), 1)
+    
+    # 保存 DAM 增强输出（如果有）
+    if dam_enhanced is not None:
+        dam_enh = dam_enhanced * usgs_std + usgs_mean
+        dam_enh_np = dam_enh.squeeze().cpu().numpy()
+        dam_enh_path = os.path.join(output_dir, f"{filename}_DAM_enhanced.tif")
+        with rasterio.open(dam_enh_path, 'w', **out_profile) as dst:
+            dst.write(dam_enh_np.astype(np.float32), 1)
 
     # 保存 Copernicus(对比用)
     cop_out_path = os.path.join(output_dir, f"{filename}_Copernicus_resampled.tif")
@@ -247,9 +280,16 @@ def run_inference(
         has_ground_truths = batch['has_ground_truth']
 
         # 前向传播
+        # 前向传播
+        print(f"Google影像范围: min={google.min().item()}, max={google.max().item()}")  # 添加这一行
         output = model(google, copernicus)
+
         hrdem_norm = output['hrdem']
-        dam_dem_norm = output.get('dam_dem', None)
+        
+        # 提取DAM输出
+        dam_output = output.get('dam_output', {})
+        dam_original_batch = dam_output.get('original_depth')  # (B, H, W) or None
+        dam_enhanced_batch = dam_output.get('enhanced_depth')  # (B, H, W) or None
 
         # 逐个保存结果
         for i in range(hrdem_norm.shape[0]):
@@ -264,7 +304,8 @@ def run_inference(
                 output_dir=output_dir,
                 filename=filenames[i],
                 save_viz=save_viz,
-                dam_dem_norm=dam_dem_norm[i] if dam_dem_norm is not None else None,
+                dam_original=dam_original_batch[i] if dam_original_batch is not None else None,
+                dam_enhanced=dam_enhanced_batch[i] if dam_enhanced_batch is not None else None,
                 has_ground_truth=has_ground_truths[i].item()
             )
 
@@ -291,14 +332,14 @@ def setup_arguments():
                         default='./Test/inference_results',
                         help='输出目录')
 
-    # 模型参数 - 与train.py保持一致
+    # 模型参数
     parser.add_argument('--encoder', type=str, default='vits',
                         choices=['vits', 'vitb', 'vitl', 'vitg'],
                         help='DAM编码器类型 (默认: vits)')
-    parser.add_argument('--num_prototypes', type=int, default=64,
-                        help='原型数量 (默认: 128)')
+    parser.add_argument('--num_prototypes', type=int, default=16,
+                        help='原型数量 (默认: 16)')
     parser.add_argument('--embedding_dim', type=int, default=32,
-                        help='嵌入维度 (默认: 64)')
+                        help='嵌入维度 (默认: 32)')
     parser.add_argument('--sr_channels', type=int, default=64,
                         help='SR网络通道数 (默认: 64)')
     parser.add_argument('--sr_residual_blocks', type=int, default=8,
@@ -312,7 +353,7 @@ def setup_arguments():
     parser.add_argument('--no_instance_guidance', action='store_false', dest='use_instance_guidance',
                         help='禁用实例引导')
     parser.add_argument('--use_adaptive_fusion', action='store_true', default=False,
-                        help='启用自适应融合 (默认: True)')
+                        help='启用自适应融合 (默认: False)')
     parser.add_argument('--no_adaptive_fusion', action='store_false', dest='use_adaptive_fusion',
                         help='禁用自适应融合')
 
@@ -356,7 +397,7 @@ def run_dem_super_resolution(
 
     # 加载模型 - 传递所有模型参数
     model = load_model(
-        checkpoint_path=checkpoint,
+        checkpoint=checkpoint,
         device=device,
         dam_encoder=encoder,
         num_prototypes=num_prototypes,

@@ -11,7 +11,7 @@ current_file_dir = os.path.dirname(os.path.abspath(__file__))
 parent_dir = os.path.dirname(current_file_dir)
 sys.path.insert(0, parent_dir)
 
-from depth_anything_v2.dpt import DepthAnythingV2
+from .src.models.depth_anything_v2.dpt import DepthAnythingV2
 from DEMAndRemoteSensingUtils import crop_source_to_reference, batch_modify_tifs_vectorized
 from LocalPath import Loess_Plateau_Copernicus, ROOT_DIR
 sys.path.insert(0, str(ROOT_DIR))

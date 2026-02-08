@@ -5,7 +5,7 @@
 1. 重命名 prototype_alphas 为 prototype_detail_strength，语义更清晰
 2. 添加可视化功能
 3. 改进融合公式注释
-4. 【修改】适配DAM的乘性门控输出（instance_bias_map现为增益图）
+4. 适配DAM的乘性门控输出（instance_bias_map现为增益图）
 """
 
 import torch
@@ -17,15 +17,15 @@ class ResidualBlock(nn.Module):
     def __init__(self, channels):
         super().__init__()
         self.conv1 = nn.Conv2d(channels, channels, kernel_size=3, padding=1)
-        self.bn1 = nn.BatchNorm2d(channels)
+        self.gn1 = nn.GroupNorm(num_groups=8, num_channels=channels)
         self.relu = nn.ReLU(inplace=True)
         self.conv2 = nn.Conv2d(channels, channels, kernel_size=3, padding=1)
-        self.bn2 = nn.BatchNorm2d(channels)
+        self.gn2 = nn.GroupNorm(num_groups=8, num_channels=channels)
 
     def forward(self, x):
         residual = x
-        out = self.relu(self.bn1(self.conv1(x)))
-        out = self.bn2(self.conv2(out))
+        out = self.relu(self.gn1(self.conv1(x)))
+        out = self.gn2(self.conv2(out))
         out += residual
         out = self.relu(out)
         return out
@@ -35,18 +35,18 @@ class ConvBlock(nn.Module):
     def __init__(self, in_channels, out_channels, kernel_size=3, stride=1, padding=1):
         super().__init__()
         self.conv = nn.Conv2d(in_channels, out_channels, kernel_size, stride, padding)
-        self.bn = nn.BatchNorm2d(out_channels)
+        self.gn = nn.GroupNorm(num_groups=min(8, out_channels), num_channels=out_channels)
         self.relu = nn.ReLU(inplace=True)
 
     def forward(self, x):
-        return self.relu(self.bn(self.conv(x)))
+        return self.relu(self.gn(self.conv(x)))
 
 
 class AdaptiveBiasFusion(nn.Module):
     """
     自适应偏置融合模块
 
-    【修改】功能更新：
+    功能更新：
     - 输入的instance_bias_map现在是乘性增益图（来自DAM的乘性门控）
     - 范围大致在[0.5, 2.0]，中心在1.0（表示不调整）
     - 模块将其作为特征输入，学习如何利用增益信息调制融合过程
@@ -67,18 +67,17 @@ class AdaptiveBiasFusion(nn.Module):
         # 差异特征提取
         self.diff_encoder = nn.Sequential(
             nn.Conv2d(2, channels // 4, kernel_size=3, padding=1),
-            nn.BatchNorm2d(channels // 4),
+            nn.GroupNorm(num_groups=min(8, channels // 4), num_channels=channels // 4),
             nn.ReLU(inplace=True),
             nn.Conv2d(channels // 4, channels // 2, kernel_size=3, padding=1),
-            nn.BatchNorm2d(channels // 2),
+            nn.GroupNorm(num_groups=8, num_channels=channels // 2),
             nn.ReLU(inplace=True),
         )
 
         # 调制权重生成网络
-        # 【修改】输入维度包含instance_bias_map（增益图），网络学习其调制模式
         self.modulation_net = nn.Sequential(
             nn.Conv2d(channels // 2 + 1, channels // 2, kernel_size=3, padding=1),
-            nn.BatchNorm2d(channels // 2),
+            nn.GroupNorm(num_groups=8, num_channels=channels // 2),
             nn.ReLU(inplace=True),
             nn.Conv2d(channels // 2, 1, kernel_size=3, padding=1),
             nn.Sigmoid()  # 输出0~1的权重
@@ -87,7 +86,7 @@ class AdaptiveBiasFusion(nn.Module):
         # 特征融合
         self.fusion_conv = nn.Sequential(
             nn.Conv2d(channels + 1, channels, kernel_size=3, padding=1),
-            nn.BatchNorm2d(channels),
+            nn.GroupNorm(num_groups=8, num_channels=channels),
             nn.ReLU(inplace=True)
         )
 
@@ -121,13 +120,11 @@ class AdaptiveBiasFusion(nn.Module):
         diff_input = torch.cat([diff, copernicus_normalized], dim=1)
         diff_features = self.diff_encoder(diff_input)  # (B, C//2, H, W)
 
-        # 【修改】生成调制权重：结合差异特征和实例增益图
-        # instance_bias_map作为增益指导：增益>1表示DAM增强了细节，应更信任relative_map
+        # 生成调制权重：结合差异特征和实例增益图
         modulation_input = torch.cat([diff_features, instance_bias_map], dim=1)
         modulation_weights = self.modulation_net(modulation_input)  # (B, 1, H, W)
 
         # 调制instance bias：增益高的区域，relative map贡献增强
-        # 【修改】解释：如果instance_bias_map > 1（DAM增强了该区域），modulation_weights会放大细节差异
         modulated_features = features * (1 + modulation_weights * (instance_bias_map - 1.0))
 
         # 融合
@@ -142,7 +139,7 @@ class InstanceGuidedAttention(nn.Module):
     """
     实例引导的注意力模块（改进版）
 
-    【修改】功能更新：
+    功能更新：
     - 输入instance_bias_map现为乘性增益图（范围~[0.5, 2.0]）
     - 注意力机制学习：增益偏离1.0越大的区域（无论增强或减弱），越需要精细处理
     """
@@ -151,10 +148,9 @@ class InstanceGuidedAttention(nn.Module):
         super(InstanceGuidedAttention, self).__init__()
 
         # 从实例增益图生成注意力权重
-        # 【修改】输入是增益图，网络学习识别增益异常区域（需要修正的区域）
         self.instance_conv = nn.Sequential(
             nn.Conv2d(1, channels // 4, kernel_size=3, padding=1),
-            nn.BatchNorm2d(channels // 4),
+            nn.GroupNorm(num_groups=min(8, channels // 4), num_channels=channels // 4),
             nn.ReLU(inplace=True),
             nn.Conv2d(channels // 4, channels, kernel_size=3, padding=1),
             nn.Sigmoid()
@@ -163,7 +159,7 @@ class InstanceGuidedAttention(nn.Module):
         # 特征变换
         self.feature_transform = nn.Sequential(
             nn.Conv2d(channels, channels, kernel_size=1),
-            nn.BatchNorm2d(channels),
+            nn.GroupNorm(num_groups=8, num_channels=channels),
             nn.ReLU(inplace=True)
         )
 
@@ -176,8 +172,6 @@ class InstanceGuidedAttention(nn.Module):
         Returns:
             attended_features: (B, C, H, W) - 注意力加权后的特征
         """
-        # 【修改】生成注意力权重：增益偏离1.0的区域（|gain-1|大）获得更高注意力
-        # 先转换为偏离量（以0为中心），再取绝对值作为重要性指示
         deviation = torch.abs(instance_bias_map - 1.0)
         attention = self.instance_conv(deviation)  # (B, C, H, W)
 
@@ -203,7 +197,7 @@ class SuperResolutionNetwork(nn.Module):
        - 目标：让Relative和Copernicus在实例级均值相同
        - 实现：offset = Copernicus_mean - Relative_mean
        - 输出：Relative_aligned = Relative + offset
-       - 【修改】注意：输入的relative_map已是DAM乘性调整后的结果（enhanced_depth）
+       - 注意：输入的relative_map已是DAM乘性调整后的结果（enhanced_depth）
 
     2. 细节调制（Detail Modulation）
        - 目标：控制Relative的细节贡献程度
@@ -215,7 +209,7 @@ class SuperResolutionNetwork(nn.Module):
        - 实现：delta = Network(Mixed)
        - 输出：HRDEM = Mixed + delta
 
-    【修改】重要：instance_bias_map现在是乘性增益图（gain map），来自DAM的乘性门控
+    重要：instance_bias_map现在是乘性增益图（gain map），来自DAM的乘性门控
     其值范围大致在[0.5, 2.0]，中心为1.0（表示DAM未调整），用于指导SR网络的注意力
     """
 
@@ -269,14 +263,14 @@ class SuperResolutionNetwork(nn.Module):
         # 特征融合卷积
         self.fusion_conv = nn.Sequential(
             nn.Conv2d(base_channels, base_channels, kernel_size=3, padding=1),
-            nn.BatchNorm2d(base_channels)
+            nn.GroupNorm(num_groups=8, num_channels=base_channels)
         )
 
         # 上采样和重构层
         self.reconstruction = nn.Sequential(
             ConvBlock(base_channels, base_channels),
             nn.Conv2d(base_channels, base_channels // 2, kernel_size=3, padding=1),
-            nn.BatchNorm2d(base_channels // 2),
+            nn.GroupNorm(num_groups=8, num_channels=base_channels // 2),
             nn.ReLU(inplace=True),
             nn.Conv2d(base_channels // 2, out_channels, kernel_size=3, padding=1)
         )
@@ -366,8 +360,6 @@ class SuperResolutionNetwork(nn.Module):
         if self.use_scale_dominance and prototype_activations is not None:
             x = self.fused_features(mixed)
         else:
-            # 【修改】注意：instance_bias_map现在是增益图，作为额外通道输入
-            # 数值范围[0.5, 2.0]，与[0,1]范围的深度图拼接
             if instance_bias_map is not None and self.use_instance_guidance:
                 x = torch.cat([copernicus_dem, relative_map, instance_bias_map], dim=1)
             else:
@@ -379,13 +371,9 @@ class SuperResolutionNetwork(nn.Module):
         # ========== 第3步：特征精修 ==========
         skip = x
 
-        # 【修改】自适应融合：使用instance_bias_map（增益图）指导融合
-        # 增益图指示了DAM对各个区域的调整强度，用于调制特征
         if self.use_adaptive_fusion and instance_bias_map is not None:
             x, _ = self.adaptive_fusion(x, copernicus_dem, relative_map, instance_bias_map)
 
-        # 实例引导注意力（空间选择）
-        # 【修改】使用增益图（偏离1.0的程度）指导注意力，关注DAM调整大的区域
         if instance_bias_map is not None and self.use_instance_guidance:
             x = self.instance_attention(x, instance_bias_map)
 
@@ -400,7 +388,6 @@ class SuperResolutionNetwork(nn.Module):
 
         # ========== 第4步：最终融合 ==========
         if instance_bias_map is not None and self.use_instance_guidance:
-            # 【修改】自适应权重：增益图偏离1.0越大的区域，越需要精修
             deviation = torch.abs(instance_bias_map - 1.0)
             adaptive_weight = self.instance_adaptive_weight(deviation)
             effective_weight = self.residual_weight * (1 + adaptive_weight)
@@ -422,7 +409,7 @@ class HRDEMToLRDEMMapper(nn.Module):
     改进：
     1. 处理非整数倍下采样
     2. 添加可视化功能
-    3. 【修改】适配乘性增益图输入（instance_bias_map作为增益特征）
+    3. 适配乘性增益图输入（instance_bias_map作为增益特征）
     """
 
     def __init__(
@@ -451,12 +438,12 @@ class HRDEMToLRDEMMapper(nn.Module):
         self.downsample_conv = nn.Sequential(
             ConvBlock(base_channels, base_channels * 2, kernel_size=3, stride=2, padding=1),
             nn.Conv2d(base_channels * 2, base_channels * 2, kernel_size=3, dilation=2, padding=2, bias=False),
-            nn.BatchNorm2d(base_channels * 2),
+            nn.GroupNorm(num_groups=8, num_channels=base_channels * 2),
             nn.ReLU(inplace=True),
 
             ConvBlock(base_channels * 2, base_channels * 2, kernel_size=3, stride=2, padding=1),
             nn.Conv2d(base_channels * 2, base_channels * 2, kernel_size=3, dilation=2, padding=2, bias=False),
-            nn.BatchNorm2d(base_channels * 2),
+            nn.GroupNorm(num_groups=8, num_channels=base_channels * 2),
             nn.ReLU(inplace=True),
 
             ConvBlock(base_channels * 2, base_channels, kernel_size=3, stride=2, padding=1),
@@ -477,7 +464,6 @@ class HRDEMToLRDEMMapper(nn.Module):
         Returns:
             lrdem: (B, 1, H', W') - 模拟的低分辨率DEM
         """
-        # 【修改】拼接hrdem和增益图，作为降解过程的输入特征
         x = torch.cat([hrdem, instance_bias_map], dim=1)
 
         features = self.feature_extractor(x)
@@ -502,7 +488,7 @@ class HRDEMToLRDEMMapper(nn.Module):
 
 
 class DEMSuperResolutionSystem(nn.Module):
-    """改进的DEM超分辨率系统 V1.1"""
+    """改进的DEM超分辨率系统 V2"""
 
     def __init__(
         self,
@@ -582,43 +568,39 @@ class DEMSuperResolutionSystem(nn.Module):
         else:
             dam_output = self.dam_model(google_image)
 
-        # 【修改】DAM输出说明：
-        # enhanced_depth: 已是乘性调整后的深度图（original_depth * gain_map归一化后）
-        # instance_bias_map: 现在是增益图（gain map），范围~[0.5, 2.0]，中心1.0
-        enhanced_depth = dam_output['enhanced_depth'].unsqueeze(1)
-        instance_bias_map = dam_output['instance_bias_map'].unsqueeze(1)
+        # 从DAM输出获取数据，维度保持 (B, H, W)
+        enhanced_depth = dam_output['enhanced_depth']  # (B, H, W)
+        instance_bias_map = dam_output['instance_bias_map']  # (B, H, W)
         prototype_activations = dam_output.get('prototype_activations', None)
 
-        # 超分辨率重构
-        # 【修改】传入的instance_bias_map是增益图，SR网络学习利用其进行注意力调制
+        # 超分辨率重构 - SR网络需要 (B, 1, H, W)
         if use_instance_guidance and self.sr_network.use_instance_guidance:
             hrdem, detail_strength_map, fusion_info = self.sr_network(
-                copernicus_dem, enhanced_depth, instance_bias_map, prototype_activations
+                copernicus_dem, enhanced_depth.unsqueeze(1), instance_bias_map.unsqueeze(1), prototype_activations
             )
         else:
             hrdem, detail_strength_map, fusion_info = self.sr_network(
-                copernicus_dem, enhanced_depth, None, prototype_activations
+                copernicus_dem, enhanced_depth.unsqueeze(1), None, prototype_activations
             )
 
-        # HR到LR映射
+        # HR到LR映射 - mapper需要 (B, 1, H, W)
         target_h = max(1, round(H / self.mapper_scale_factor))
         target_w = max(1, round(W / self.mapper_scale_factor))
-        # 【修改】传入增益图辅助降采样映射
         mapped_lrdem = self.mapper_network(
-            hrdem, instance_bias_map, target_size=(target_h, target_w)
+            hrdem, instance_bias_map.unsqueeze(1), target_size=(target_h, target_w)
         )
 
         result = {
-            'dam_dem': enhanced_depth,
             'hrdem': hrdem,
             'mapped_lrdem': mapped_lrdem,
             'dam_output': {
-                'enhanced_depth': dam_output['enhanced_depth'],
-                'instance_bias_map': dam_output['instance_bias_map'],  # 增益图
-                'prototype_activations': dam_output.get('prototype_activations', None),
+                'original_depth': dam_output['original_depth'],  # (B, H, W) DAM原始输出
+                'enhanced_depth': enhanced_depth,  # (B, H, W) DAM增强输出
+                'instance_bias_map': instance_bias_map,  # (B, H, W)
+                'prototype_activations': prototype_activations,
                 'base_biases': dam_output.get('base_biases', None),
                 'spatial_residual': dam_output.get('spatial_residual', None),
-                'activation_entropy': dam_output.get('activation_entropy', None),  # 【修改】新增
+                'activation_entropy': dam_output.get('activation_entropy', None),
             },
             'detail_strength_map': detail_strength_map,
         }

@@ -362,6 +362,10 @@ class DEMSuperResolutionDataset(Dataset):
         # 处理Google影像
         google_data = google_data.astype(np.float32)
         if self.normalize:
+            # 根据数据范围判断是否需要 /255
+            # 如果最大值 > 10，认为是 0-255 范围，需要归一化
+            if google_data.max() > 1:
+                google_data = google_data / 255.0
             for i in range(min(3, google_data.shape[0])):
                 google_data[i] = (google_data[i] - self.image_mean[i]) / self.image_std[i]
             # 确保3通道

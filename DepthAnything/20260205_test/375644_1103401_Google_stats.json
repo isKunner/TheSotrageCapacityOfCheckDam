@@ -1,0 +1,23 @@
+{
+  "filename": "375644_1103401_Google",
+  "dimensions": "1022x1022",
+  "normalization": {
+    "cop_mean": 1008.53515625,
+    "cop_std": 39.3514404296875,
+    "usgs_mean": 1008.53515625,
+    "usgs_std": 39.3514404296875,
+    "has_ground_truth": false
+  },
+  "predicted_hrdem": {
+    "min": 966.7705078125,
+    "max": 1058.28466796875,
+    "mean": 1008.4827880859375,
+    "std": 21.723735809326172
+  },
+  "input_copernicus": {
+    "min": 941.0,
+    "max": 1105.0,
+    "mean": 1008.5831298828125,
+    "std": 39.47770309448242
+  }
+}

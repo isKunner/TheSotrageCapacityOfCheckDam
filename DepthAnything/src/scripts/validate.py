@@ -29,9 +29,9 @@ import rasterio
 from rasterio.transform import from_origin
 import matplotlib.pyplot as plt
 
-from src.data import DEMSuperResolutionDataset, collect_valid_samples
-from src.models import create_dam_model, create_super_resolution_system
-from src.training import calculate_metrics
+from ..data import DEMSuperResolutionDataset, collect_valid_samples
+from ..models import create_dam_model, create_super_resolution_system
+from ..training import calculate_metrics
 
 
 class Validator:
@@ -426,8 +426,8 @@ class Validator:
 
 def load_model_from_checkpoint(
     checkpoint_path: str,
-    dam_encoder: str = 'vitl',
-    num_instances: int = 64,
+    dam_encoder: str = 'vits',
+    num_prototypes: int = 16,
     device: str = 'cuda'
 ):
     """
@@ -436,7 +436,7 @@ def load_model_from_checkpoint(
     Args:
         checkpoint_path: 检查点路径
         dam_encoder: DAM编码器类型
-        num_instances: 实例数量
+        num_prototypes: 原型数量
         device: 设备
     
     Returns:
@@ -445,7 +445,7 @@ def load_model_from_checkpoint(
     # 创建DAM模型
     dam_model = create_dam_model(
         encoder=dam_encoder,
-        num_instances=num_instances,
+        num_prototypes=num_prototypes,
         device=device
     )
     
@@ -480,8 +480,8 @@ def main():
     # 模型参数
     parser.add_argument('--checkpoint', type=str, required=True,
                         help='模型检查点路径')
-    parser.add_argument('--dam_encoder', type=str, default='vitl')
-    parser.add_argument('--num_instances', type=int, default=64)
+    parser.add_argument('--dam_encoder', type=str, default='vits')
+    parser.add_argument('--num_prototypes', type=int, default=16)
     
     # 数据集验证参数
     parser.add_argument('--data_dir', type=str,
@@ -530,7 +530,7 @@ def main():
     model = load_model_from_checkpoint(
         args.checkpoint,
         args.dam_encoder,
-        args.num_instances,
+        args.num_prototypes,
         device
     )
     

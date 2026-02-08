@@ -28,7 +28,8 @@ from .losses import (
     RMSELoss,
     CombinedLoss,
     GradientLoss,
-    SSIMLoss
+    LaplacianHFLoss,
+    DAMEnhancedHFLoss,
 )
 
 __all__ = [
@@ -48,5 +49,6 @@ __all__ = [
     'RMSELoss',
     'CombinedLoss',
     'GradientLoss',
-    'SSIMLoss',
+    'LaplacianHFLoss',
+    'DAMEnhancedHFLoss',
 ]

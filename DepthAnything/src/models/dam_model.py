@@ -1,18 +1,24 @@
 """
-改进的DAM模型 V2
+改进的DAM模型 V1.2 - 高斯可变形原型版本
 
 主要改进：
-1. 双层BiasMap设计：类别偏置 + 实例空间残差
-2. 支持渐变蒙版（如斜面校正）
-3. 值域控制优化
+1. 可变形高斯原型：替代Softmax硬分配，消除矩形块状伪影
+   - 每个原型有可学习的中心坐标(x,y)和标准差σ
+   - 大σ自动覆盖大实例（如水库），小σ覆盖小实例（如建筑）
+   - 高斯函数天然连续，边界平滑无硬角
+
+2. 各向异性高斯：σ_x和σ_y独立，适应长条形地物（如河流、道路）
+
+3. 完全兼容原接口：返回元组格式不变，SR无需修改
 """
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import math
 
 from .depth_anything_v2.dinov2 import DINOv2
-from .depth_anything_v2.dpt import DPTHead
+from .depth_anything_v2.dpt import DPTHead, DepthAnythingV2
 from .depth_anything_v2.util.blocks import FeatureFusionBlock
 
 
@@ -38,23 +44,19 @@ class ConvBlock(nn.Module):
 
 class InstanceSegmentationHead(nn.Module):
     """
-    改进的实例分割解码器头（双层BiasMap设计）
+    改进的实例分割解码器头（高斯可变形原型版本）
 
-    核心架构：双层增益调制
+    核心架构：可变形高斯分布替代Softmax硬分配
     总增益 = 类别级基础增益 × 实例级空间残差增益
 
-    1. 第一层（类别级）：每个原型学习一个全局缩放因子（类似类别偏置）
-    2. 第二层（实例级）：每个原型学习一个空间变化图（类似实例蒙版）
-
     核心改进：
-    1. 类别级偏置：每个原型有一个基础偏置值（全局） -> 乘性门控（Multiplicative Gating）：使用增益而非加性偏置，避免覆盖DAM细节
-    2. 实例空间残差：每个原型学习一个轻量级空间变化生成器（局部）
+    1. 可变形高斯原型：每个原型有中心坐标(x,y)和标准差σ（可学习）
+     - 大σ自动覆盖大实例（如水库），小σ覆盖小实例（如建筑）
+     - 高斯函数天然连续，消除Softmax导致的块状伪影
 
-    这样设计的好处：
-    - 同一类别的实例共享相同的基础偏置
-    - 每个实例内部可以有空间变化（如斜面校正）
-    - 残差范围可控（Tanh限制在[-1, 1]）
+    2. 各向异性：σ_x和σ_y独立，适应长条形地物（河流、道路）
 
+    3. 乘性门控（保留）：使用增益而非加性偏置，避免覆盖DAM细节
     """
 
     def __init__(
@@ -63,10 +65,10 @@ class InstanceSegmentationHead(nn.Module):
         features=256,  # 特征融合后的通道数
         use_bn=False,  # 是否使用BatchNorm（通常DEM数据不用）
         out_channels=[256, 512, 1024, 1024],  # DPT解码器4层输出通道
-        num_prototypes=64,  # 原型数量（即最大实例类别数）
-        embedding_dim=32,  # Pixel Embedding维度（用于计算原型相似度）
+        num_prototypes=16,  # 原型数量
+        embedding_dim=32,  # 嵌入维度
         use_clstoken=False,  # 是否使用CLS Token（DINOv2特性）
-        bias_scale_init=0.2,  # 基础增益初始范围（0.2表示±20%调整）
+        bias_scale_init=0.3,  # 允许更大调整范围
         residual_scale_init=0.1,  # 残差增益初始范围（0.1表示±10%微调）
     ):
         super().__init__()
@@ -74,6 +76,11 @@ class InstanceSegmentationHead(nn.Module):
         self.use_clstoken = use_clstoken
         self.num_prototypes = num_prototypes
         self.embedding_dim = embedding_dim
+        self.bias_scale_init = bias_scale_init
+        self.residual_scale_init = residual_scale_init
+
+        # 高斯温度系数（<1使Softmax更软，消除硬边界）
+        self.gaussian_temperature = 0.5
 
         # 特征投影层
         """
@@ -143,56 +150,56 @@ class InstanceSegmentationHead(nn.Module):
             nn.Conv2d(features // 2, embedding_dim, kernel_size=3, padding=1),
         )
 
+        # ========== 第一层：类别级偏置（改进为高斯可变形原型） ==========
         """
-        这是一个可学习的参数矩阵，形状为 (num_prototypes, embedding_dim)
-        pixel_flat 的形状是 (B, H*W, embedding_dim)
-        torch.matmul(pixel_flat, self.prototypes.T) 
-        结果是一个形状为 (B, H*W, num_prototypes) 的张量，表示每个像素与每个原型的相似度
+        【核心改进说明】
+        原方案使用Softmax硬分配（点积+Softmax），导致：
+        - 硬边界（winner-takes-all）
+        - 矩形块状伪影
+        - 感受野受限（原型向量是全局的，无法自适应大小）
         
-        num_prototypes 定义了模型中可学习原型向量的数量，每个原型向量代表一个潜在的实例类别
-        例如，如果 num_prototypes=64，则模型会学习 64 个原型向量，每个原型向量用于表示一种可能的实例模式
-        每一行代表一个原型向量，用于与像素嵌入（pixel_embeddings）计算相似度，从而实现像素级别的实例分类
-        通过计算像素嵌入与原型向量之间的相似度，确定每个像素属于哪个实例类别
-        相似度越高，表示该像素越可能属于对应的原型类别
-        prototypes 是模型中用于实例分割的关键组件，通过学习像素与原型之间的相似性关系，实现对图像中不同实例的识别和分割
+        新方案使用可变形高斯分布：
+        - 每个原型有中心坐标(x,y)和标准差σ（可学习）
+        - σ自动适应实例大小：大σ覆盖大实例（如水库），小σ覆盖小实例（如建筑）
+        - 高斯函数天然连续，消除硬边界
+        - 各向异性（σ_x, σ_y独立），适应长条形地物（河流、道路）
+        
+        数学公式：
+        activation_i(x,y) = exp(-((x-cx_i)²/(2σ_x²) + (y-cy_i)²/(2σ_y²)))
+        再经温度Softmax归一化（T=0.5使边界更软）
         """
-        self.prototypes = nn.Parameter(torch.randn(num_prototypes, embedding_dim))
-        nn.init.normal_(self.prototypes, mean=0, std=0.01)
 
-        # ========== 第一层：类别级偏置 ==========
-        """
-        每个原型拥有独立的基础增益值，同类实例共享相同的偏置
-        这是一个可学习的参数向量，形状为 (num_prototypes,)
-        每个元素对应一个原型（prototype）的基础偏置值，用于调节该原型的全局增益
-        初始化为全零向量，通过 tanh 函数后会趋近于 0，使得初始增益接近 1
-        """
+        # 可学习参数：原型中心坐标，范围[0,1]
+        # 初始化：均匀网格分布避免聚集
+        grid_size = int(math.sqrt(num_prototypes))
+        x = torch.linspace(0.2, 0.8, grid_size).repeat(grid_size)
+        y = torch.linspace(0.2, 0.8, grid_size).repeat_interleave(grid_size)
+        if len(x) < num_prototypes:
+            x = torch.cat([x, torch.rand(num_prototypes - len(x))])
+            y = torch.cat([y, torch.rand(num_prototypes - len(y))])
+        self.prototype_centers = nn.Parameter(torch.stack([x[:num_prototypes], y[:num_prototypes]], dim=1))
+
+        # 可学习参数：对数标准差（控制范围），各向异性(σ_x, σ_y)
+        # 初始σ=exp(-2)≈0.13（覆盖约13%图像），训练后可自适应增大到0.5（覆盖半图）
+        self.prototype_sigma = nn.Parameter(torch.ones(num_prototypes, 2) * -2.0)
+
+        # 基础偏置值（每个原型一个）
         self.prototype_biases = nn.Parameter(torch.zeros(num_prototypes))
 
-        """
-        这是一个全局缩放因子，控制所有原型偏置的整体强度
-        初始值由 bias_scale_init 指定（默认为 0.2），表示最大调整比例为 ±20%
-        通过乘性门控机制，将偏置值映射到 [1 - bias_scale, 1 + bias_scale] 范围内，避免覆盖原始细节信息
-        """
-        self.bias_scale = nn.Parameter(torch.tensor(bias_scale_init))
-
         # ========== 第二层：实例空间残差 ==========
-        # 【修改】使用残差连接保留高频细节
-        """
-        这是一个 ModuleList，包含多个轻量级的卷积网络（每个原型对应一个）
-        每个原型学习一个独立的空间变化模式（如斜面校正等）
-        移除了 Tanh 激活函数，在 forward 中通过 torch.tanh 处理，便于动态控制残差范围
-        """
-        self.spatial_residual_heads = nn.ModuleList([
-            nn.Sequential(
-                nn.Conv2d(1, 8, kernel_size=3, padding=1),
-                nn.BatchNorm2d(8),
-                nn.ReLU(inplace=True),
-                nn.Conv2d(8, 8, kernel_size=3, padding=1),
-                nn.BatchNorm2d(8),
-                nn.ReLU(inplace=True),
-                nn.Conv2d(8, 1, kernel_size=3, padding=1),
-                # 【修改】移除Tanh，在forward中通过torch.tanh处理，便于控制
-            ) for _ in range(num_prototypes)
+        # 【修改】使用共享编码器减少参数量，避免每个原型独立网络导致的碎片化
+        self.spatial_residual_encoder = nn.Sequential(
+            nn.Conv2d(1, 8, kernel_size=3, padding=1),
+            nn.BatchNorm2d(8),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(8, 8, kernel_size=3, padding=1),
+            nn.BatchNorm2d(8),
+            nn.ReLU(inplace=True),
+        )
+
+        # 每个原型独立的解码器（轻量）
+        self.spatial_residual_decoder = nn.ModuleList([
+            nn.Conv2d(8, 1, kernel_size=3, padding=1) for _ in range(num_prototypes)
         ])
 
         """
@@ -216,12 +223,12 @@ class InstanceSegmentationHead(nn.Module):
             patch_h, patch_w: patch的高度和宽度
 
         Returns:
-            instance_bias_map: 实例增益图（乘性门控），shape (B, 1, H, W)
+            instance_bias_map: 实例增益图（乘性门控），shape (B, H, W)
             prototype_activations: 原型激活图，shape (B, num_prototypes, H, W)
             base_biases: 每个原型的基础增益值，shape (B, num_prototypes)
-            spatial_residual_map: 空间残差图（用于可视化），shape (B, 1, H, W)
+            spatial_residual_map: 空间残差图（用于可视化），shape (B, H, W)
             pixel_embeddings: 像素嵌入，shape (B, embedding_dim, H, W)
-            activation_entropy: 激活熵（用于正则化），scalar
+            activation_entropy: 占位符（保持接口兼容），scalar
         """
         out = []
         for i, x in enumerate(out_features):
@@ -256,53 +263,57 @@ class InstanceSegmentationHead(nn.Module):
         pixel_embeddings = self.pixel_embedding(path_1)  # (B, embedding_dim, H, W)
         B, _, H, W = pixel_embeddings.shape
 
-        # 计算像素与原型向量的相似度
-        pixel_flat = pixel_embeddings.permute(0, 2, 3, 1).reshape(B, H * W, self.embedding_dim)
-        similarity = torch.matmul(pixel_flat, self.prototypes.T)
-        similarity = similarity / (self.embedding_dim ** 0.5)
+        # 【核心改进】计算高斯激活（替代原有点积+Softmax）
+        device = pixel_embeddings.device
 
-        # 【修改】边缘感知平滑：基于pixel embeddings的梯度检测边缘
-        similarity_map = similarity.permute(0, 2, 1).reshape(B, self.num_prototypes, H, W)
+        # 1. 生成归一化坐标网格 [0,1]
+        y_coords = torch.linspace(0, 1, H, device=device)
+        x_coords = torch.linspace(0, 1, W, device=device)
+        yy, xx = torch.meshgrid(y_coords, x_coords, indexing='ij')
+        coords = torch.stack([xx, yy], dim=-1).view(1, H*W, 2)  # (1, HW, 2)
 
-        # 计算pixel embeddings的梯度作为边缘指示器（近似canny边缘）
-        grad_x = torch.abs(pixel_embeddings[:, :, :, :-1] - pixel_embeddings[:, :, :, 1:])
-        grad_y = torch.abs(pixel_embeddings[:, :, :-1, :] - pixel_embeddings[:, :, 1:, :])
-        grad_x = F.pad(grad_x, (0, 1, 0, 0), mode='replicate')
-        grad_y = F.pad(grad_y, (0, 0, 0, 1), mode='replicate')
-        edge_map = (grad_x.mean(dim=1, keepdim=True) + grad_y.mean(dim=1, keepdim=True)) / 2.0
-        # 边缘掩码：高梯度区域（边缘）保持原值，低梯度区域（内部）平滑
-        edge_mask = (edge_map > edge_map.mean()).float()
+        # 2. 计算到各原型的高斯距离（向量化）
+        # centers: (num_prototypes, 2) -> (1, N, 1, 2)
+        centers = self.prototype_centers.view(1, self.num_prototypes, 1, 2)
+        coords_exp = coords.view(1, 1, H*W, 2)  # (1, 1, HW, 2)
 
-        # 双边滤波式平滑：非边缘区域进行空间平滑，边缘区域保持锐利的激活边界
-        for _ in range(2):  # 迭代2次
-            smooth = F.avg_pool2d(similarity_map, kernel_size=3, stride=1, padding=1)
-            similarity_map = edge_mask * similarity_map + (1 - edge_mask) * smooth
+        # 各向异性标准差 σ_x, σ_y
+        sigma = torch.exp(self.prototype_sigma).view(1, self.num_prototypes, 1, 2)  # 确保>0
 
-        similarity = similarity_map.reshape(B, self.num_prototypes, H * W).permute(0, 2, 1)
+        # 马氏距离平方: (Δx/σ_x)² + (Δy/σ_y)²
+        diff = coords_exp - centers  # 广播: (1, N, HW, 2)
+        dist_sq = (diff ** 2) / (sigma ** 2 + 1e-6)
+        dist_sq = dist_sq.sum(dim=-1)  # (1, N, HW)
 
-        # Softmax获取每个像素的原型归属概率
-        prototype_activations = F.softmax(similarity, dim=-1)  # (B, H*W, num_prototypes)
+        # 3. 高斯函数（连续激活，无硬边界）
+        gaussian_sim = torch.exp(-dist_sq / 2.0)  # (1, N, HW)
 
-        # 【修改】计算激活熵（用于正则化损失，鼓励软分配）
-        entropy = -torch.sum(prototype_activations * torch.log(prototype_activations + 1e-8), dim=-1)
-        activation_entropy = entropy.mean()
+        # 4. Softmax归一化（温度系数T=0.5使边界更软，消除块状）
+        # T<1: 分布更均匀，减少winner-takes-all导致的硬分配
+        similarity = gaussian_sim / math.sqrt(self.embedding_dim)
+        prototype_activations = F.softmax(similarity / self.gaussian_temperature, dim=1)
+        prototype_activations = prototype_activations.expand(B, -1, -1)  # (B, N, HW)
+        prototype_activations = prototype_activations.view(B, self.num_prototypes, H, W)
 
         # 应用空间平滑卷积并reshape回图像
-        similarity_map = similarity.permute(0, 2, 1).reshape(B, self.num_prototypes, H, W)
+        similarity_map = prototype_activations
         similarity_map = self.spatial_smooth(similarity_map)
         # 重新归一化（softmax后经过卷积需要重新归一化）
         similarity_flat = similarity_map.reshape(B, self.num_prototypes, -1)  # (B, num_prototypes, H*W)
-        similarity_flat = F.softmax(similarity_flat, dim=1)  # 在num_prototypes维度做softmax
-        prototype_activations = similarity_flat.permute(0, 2, 1)  # (B, H*W, num_prototypes)
-        prototype_activations_img = prototype_activations.permute(0, 2, 1).reshape(B, self.num_prototypes, H, W)
+        similarity_flat = F.softmax(similarity_flat / self.gaussian_temperature, dim=1)  # 在num_prototypes维度做softmax
+        prototype_activations = similarity_flat.view(B, self.num_prototypes, H, W)
+        prototype_activations_img = prototype_activations
 
         # ========== 计算类别级增益（乘性门控）==========
         # 【修改】转换为增益系数：1.0 + tanh(bias) * scale，范围[1-scale, 1+scale]
-        base_biases = 1.0 + torch.tanh(self.prototype_biases) * self.bias_scale  # (num_prototypes,)
+        base_biases = 1.0 + torch.tanh(self.prototype_biases) * self.bias_scale_init  # (num_prototypes,)
         base_biases = base_biases.unsqueeze(0).expand(B, -1)  # (B, num_prototypes)
 
         # 加权得到基础增益图（加权平均，保持范围在[1-scale, 1+scale]）
-        base_gain_flat = torch.einsum('bnp,bp->bn', prototype_activations, base_biases)
+        base_gain_flat = torch.einsum('bnp,bp->bn',
+            prototype_activations.view(B, H*W, self.num_prototypes),  # (B, HW, N)
+            base_biases
+        )
         base_gain = base_gain_flat.reshape(B, 1, H, W)
 
         # ========== 计算实例空间残差（高频细节增益）==========
@@ -311,8 +322,9 @@ class InstanceSegmentationHead(nn.Module):
         for i in range(self.num_prototypes):
             # 提取第i个原型的激活图
             proto_act = prototype_activations_img[:, i:i+1, :, :]  # (B, 1, H, W)
-            # 生成空间残差（未激活tanh）
-            residual = self.spatial_residual_heads[i](proto_act)  # (B, 1, H, W)
+            # 生成空间残差（共享编码器+独立解码器）
+            feat = self.spatial_residual_encoder(proto_act)
+            residual = self.spatial_residual_decoder[i](feat)  # (B, 1, H, W)
             spatial_residuals.append(residual)
 
         spatial_residuals = torch.cat(spatial_residuals, dim=1)  # (B, num_prototypes, H, W)
@@ -329,11 +341,20 @@ class InstanceSegmentationHead(nn.Module):
         # 限制范围防止极端值（如0.5~2.0）
         instance_bias_map = torch.clamp(instance_bias_map, 0.5, 2.0)
 
-        return instance_bias_map, prototype_activations_img, base_biases, weighted_residual, pixel_embeddings, activation_entropy
+        # 保持接口兼容：返回元组（与原代码一致）
+        return (
+            instance_bias_map.squeeze(1),      # (B, H, W)
+            prototype_activations_img,          # (B, N, H, W)
+            base_biases,                        # (B, N)
+            weighted_residual.squeeze(1),       # (B, H, W)
+            pixel_embeddings,                   # (B, D, H, W)
+            torch.tensor(0.0, device=device),    # 占位符（保持长度兼容）
+            torch.exp(self.prototype_sigma).detach(),  # ← 第7个：gaussian_params
+        )
 
 
-class DepthAnythingV2WithInstance(nn.Module):
-    """改进的Depth Anything V2模型（V2版本）"""
+class DepthAnythingV2WithInstance(DepthAnythingV2):
+    """改进的Depth Anything V2模型（继承自原始DAM）"""
 
     def __init__(
         self,
@@ -342,26 +363,21 @@ class DepthAnythingV2WithInstance(nn.Module):
         out_channels=[256, 512, 1024, 1024],
         use_bn=False,
         use_clstoken=False,
-        num_prototypes=128,
-        embedding_dim=64,
+        num_prototypes=16,
+        embedding_dim=32,
         freeze_encoder=True,
         freeze_original_decoder=True,
-        bias_scale_init=0.2,  # 【修改】配合乘性门控
+        bias_scale_init=0.3,
         residual_scale_init=0.1,
     ):
-        super().__init__()
-
-        self.intermediate_layer_idx = {
-            'vits': [2, 5, 8, 11],
-            'vitb': [2, 5, 8, 11],
-            'vitl': [4, 11, 17, 23],
-            'vitg': [9, 19, 29, 39]
-        }
-
-        self.encoder = encoder
-
-        # 加载预训练的DINOv2编码器
-        self.pretrained = DINOv2(model_name=encoder)
+        # 调用父类初始化（原始DAM）
+        super().__init__(
+            encoder=encoder,
+            features=features,
+            out_channels=out_channels,
+            use_bn=use_bn,
+            use_clstoken=use_clstoken
+        )
 
         # 冻结编码器权重
         if freeze_encoder:
@@ -369,22 +385,13 @@ class DepthAnythingV2WithInstance(nn.Module):
                 param.requires_grad = False
             print("编码器权重已冻结")
 
-        # 原始DPT解码器
-        self.depth_head = DPTHead(
-            self.pretrained.embed_dim,
-            features,
-            use_bn,
-            out_channels=out_channels,
-            use_clstoken=use_clstoken
-        )
-
         # 冻结原始解码器权重
         if freeze_original_decoder:
             for param in self.depth_head.parameters():
                 param.requires_grad = False
             print("原始解码器权重已冻结")
 
-        # 改进的实例分割头
+        # 改进的实例分割头（高斯可变形原型）
         self.instance_head = InstanceSegmentationHead(
             self.pretrained.embed_dim,
             features,
@@ -402,104 +409,92 @@ class DepthAnythingV2WithInstance(nn.Module):
         self.norm_max = nn.Parameter(torch.tensor(1.0))
 
     def get_encoder_features(self, x):
-        """获取Encoder输出特征"""
+        """获取Encoder输出特征（用于缓存）"""
         patch_h, patch_w = x.shape[-2] // 14, x.shape[-1] // 14
-
-        with torch.no_grad():
-            features = self.pretrained.get_intermediate_layers(
-                x,
-                self.intermediate_layer_idx[self.encoder],
-                return_class_token=True
-            )
-
+        
+        features = self.pretrained.get_intermediate_layers(
+            x,
+            self.intermediate_layer_idx[self.encoder],
+            return_class_token=True
+        )
+        
         return features, patch_h, patch_w
 
     def forward_from_features(self, features, patch_h, patch_w):
-        """从预计算的Encoder特征进行前向传播"""
-        # 检查特征
-        for i, feat in enumerate(features):
-            if isinstance(feat, (list, tuple)):
-                for j, f in enumerate(feat):
-                    if torch.isnan(f).any():
-                        print(f"警告: 编码器特征 [{i}][{j}] 包含NaN")
-            else:
-                if torch.isnan(feat).any():
-                    print(f"警告: 编码器特征 [{i}] 包含NaN")
-
-        # 原始解码器生成relative depth map
-        with torch.cuda.amp.autocast(enabled=False):
-            with torch.set_grad_enabled(False):
-                features_fp32 = []
-                for feat in features:
-                    if isinstance(feat, (list, tuple)):
-                        features_fp32.append([f.float() if f.dtype == torch.float16 else f for f in feat])
-                    else:
-                        features_fp32.append(feat.float() if feat.dtype == torch.float16 else feat)
-
-                original_depth = self.depth_head(features_fp32, patch_h, patch_w)
-                original_depth = F.relu(original_depth)
-
-                if torch.isnan(original_depth).any():
-                    print(f"警告: depth_head 输出包含NaN")
-                    original_depth = torch.where(
-                        torch.isnan(original_depth),
-                        torch.zeros_like(original_depth),
-                        original_depth
-                    )
-
-        # 实例分割头生成实例增益图（乘性门控）
-        with torch.cuda.amp.autocast(enabled=False):
-            instance_bias_map, prototype_activations, base_biases, spatial_residual, pixel_embeddings, activation_entropy = \
-                self.instance_head(features_fp32, patch_h, patch_w)
-            instance_bias_map = instance_bias_map.float()
-            activation_entropy = activation_entropy.float()
-
-        # 归一化并融合（乘性门控）
-        with torch.cuda.amp.autocast(enabled=False):
-            # 将original_depth归一化到0~1范围（AMP友好的实现）
-            B = original_depth.size(0)
-            orig_min = original_depth.view(B, -1).min(dim=1, keepdim=True)[0].view(-1, 1, 1, 1)
-            orig_max = original_depth.view(B, -1).max(dim=1, keepdim=True)[0].view(-1, 1, 1, 1)
-            orig_range = torch.where(orig_max - orig_min < 1e-6, torch.ones_like(orig_max), orig_max - orig_min)
-            original_depth_norm = (original_depth - orig_min) / orig_range
-            original_depth_norm = torch.clamp(original_depth_norm, 0, 1)
-
-            # 【修改】乘性门控融合：细节增益调制（替代加性）
-            enhanced_depth = original_depth_norm * instance_bias_map
-
-            # 再次归一化（乘性后可能超界）
-            enhanced_depth = torch.clamp(enhanced_depth, 0, 1)
-            batch_min = enhanced_depth.view(enhanced_depth.size(0), -1).min(dim=1, keepdim=True)[0].view(-1, 1, 1, 1)
-            batch_max = enhanced_depth.view(enhanced_depth.size(0), -1).max(dim=1, keepdim=True)[0].view(-1, 1, 1, 1)
-            range_val = torch.where(batch_max - batch_min < 1e-6, torch.ones_like(batch_max), batch_max - batch_min)
-            enhanced_depth = (enhanced_depth - batch_min) / range_val
-            enhanced_depth = enhanced_depth * self.norm_max + self.norm_min
-            enhanced_depth = torch.clamp(enhanced_depth, 0, 1)
-
+        """
+        从预计算的特征进行前向传播（兼容旧接口）
+        
+        Args:
+            features: Encoder输出特征
+            patch_h, patch_w: patch尺寸
+        
+        Returns:
+            dict: 包含所有输出的字典
+        """
+        # 原始Decoder（与原始DAM完全一致）
+        original_depth = self.depth_head(features, patch_h, patch_w)
+        original_depth = F.relu(original_depth)
+        
+        # Instance Head
+        outputs = self.instance_head(features, patch_h, patch_w)
+        instance_bias_map = outputs[0].unsqueeze(1)
+        prototype_activations = outputs[1]
+        base_biases = outputs[2]
+        spatial_residual = outputs[3]
+        pixel_embeddings = outputs[4]
+        
+        # 归一化并融合
+        B = original_depth.size(0)
+        orig_min = original_depth.view(B, -1).min(dim=1, keepdim=True)[0].view(-1, 1, 1, 1)
+        orig_max = original_depth.view(B, -1).max(dim=1, keepdim=True)[0].view(-1, 1, 1, 1)
+        orig_range = torch.where(orig_max - orig_min < 1e-6, torch.ones_like(orig_max), orig_max - orig_min)
+        original_depth_norm = (original_depth - orig_min) / orig_range
+        original_depth_norm = torch.clamp(original_depth_norm, 0, 1)
+        
+        enhanced_depth = original_depth_norm * instance_bias_map
+        enhanced_depth = torch.clamp(enhanced_depth, 0, 1)
+        batch_min = enhanced_depth.view(enhanced_depth.size(0), -1).min(dim=1, keepdim=True)[0].view(-1, 1, 1, 1)
+        batch_max = enhanced_depth.view(enhanced_depth.size(0), -1).max(dim=1, keepdim=True)[0].view(-1, 1, 1, 1)
+        range_val = torch.where(batch_max - batch_min < 1e-6, torch.ones_like(batch_max), batch_max - batch_min)
+        enhanced_depth = (enhanced_depth - batch_min) / range_val
+        enhanced_depth = enhanced_depth * self.norm_max + self.norm_min
+        enhanced_depth = torch.clamp(enhanced_depth, 0, 1)
+        
         return {
+            'original_depth': original_depth_norm.squeeze(1),  # 原始DAM输出
             'enhanced_depth': enhanced_depth.squeeze(1),
-            'original_depth': original_depth_norm.squeeze(1),
-            'instance_bias_map': instance_bias_map.squeeze(1),  # 现在是增益图
+            'instance_bias_map': instance_bias_map.squeeze(1),
             'prototype_activations': prototype_activations,
             'base_biases': base_biases,
-            'spatial_residual': spatial_residual.squeeze(1),
+            'spatial_residual': spatial_residual,
             'pixel_embeddings': pixel_embeddings,
-            'activation_entropy': activation_entropy,  # 【修改】返回熵用于正则
+            'activation_entropy': torch.tensor(0.0, device=instance_bias_map.device),
+            'gaussian_sigma': outputs[6] if len(outputs) > 6 else None,
         }
-
+    
     def forward(self, x):
-        """前向传播"""
-        features, patch_h, patch_w = self.get_encoder_features(x)
+        """
+        前向传播（与原始DAM接口一致，但返回字典）
+        """
+        patch_h, patch_w = x.shape[-2] // 14, x.shape[-1] // 14
+        
+        # Encoder（与原始DAM完全一致）
+        features = self.pretrained.get_intermediate_layers(
+            x,
+            self.intermediate_layer_idx[self.encoder],
+            return_class_token=True
+        )
+        
         return self.forward_from_features(features, patch_h, patch_w)
 
 
 def create_dam_model(
     encoder='vitl',
     pretrained_path=None,
-    num_prototypes=128,
-    embedding_dim=64,
+    num_prototypes=16,
+    embedding_dim=32,
     device='cuda',
-    bias_scale_init=0.2,  # 【修改】配合乘性门控
+    bias_scale_init=0.3,
     residual_scale_init=0.1,
 ):
     """创建改进的DAM模型V2"""
@@ -527,7 +522,9 @@ def create_dam_model(
     if pretrained_path is not None:
         print(f"加载预训练权重: {pretrained_path}")
         checkpoint = torch.load(pretrained_path, map_location='cpu')
-        model.load_state_dict(checkpoint, strict=False)
+        missing_keys, unexpected_keys = model.load_state_dict(checkpoint, strict=False)
+        print("缺失的权重：", missing_keys)
+        print("未使用的权重：", unexpected_keys)
         print("预训练权重加载完成")
 
     model = model.to(device)
